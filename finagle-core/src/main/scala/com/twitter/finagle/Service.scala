@@ -136,6 +136,7 @@ abstract class ServiceFactory[-Req, +Rep]
    * its underlying connection. To relinquish the use of the reserved
    * Service, the user must call Service.close().
    */
+  // Review 3
   def apply(conn: ClientConnection): Future[Service[Req, Rep]]
   final def apply(): Future[Service[Req, Rep]] = this(ClientConnection.nil)
 
