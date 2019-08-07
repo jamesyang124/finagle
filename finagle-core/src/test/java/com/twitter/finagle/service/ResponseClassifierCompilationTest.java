@@ -15,6 +15,15 @@ import com.twitter.util.Throw;
 public class ResponseClassifierCompilationTest {
 
   @Test
+  public void testNamedOrElse() {
+    PartialFunction<ReqRep, ResponseClass> orElse =
+        ResponseClassifier.Default().orElse(ResponseClassifier.Default());
+    assertEquals(
+        "DefaultResponseClassifier.orElse(DefaultResponseClassifier)",
+        orElse.toString());
+  }
+
+  @Test
   public void testDefault() {
     PartialFunction<ReqRep, ResponseClass> classifier =
         ResponseClassifier.Default();
@@ -30,6 +39,10 @@ public class ResponseClassifierCompilationTest {
     assertEquals(
         ResponseClasses.RETRYABLE_FAILURE,
         classifier.apply(new ReqRep(null, new Throw<Object>(Failure.rejected()))));
+
+    assertEquals(
+        ResponseClasses.IGNORED,
+        classifier.apply(new ReqRep(null, new Throw<Object>(Failure.ignorable("")))));
   }
 
   @Test

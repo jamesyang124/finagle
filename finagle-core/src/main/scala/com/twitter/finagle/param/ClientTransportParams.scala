@@ -2,10 +2,15 @@ package com.twitter.finagle.param
 
 import com.twitter.finagle.Stack
 import com.twitter.finagle.client.Transporter
-import com.twitter.finagle.ssl.{Ssl, Engine}
-import com.twitter.finagle.transport.{TlsConfig, Transport}
+import com.twitter.finagle.ssl.TrustCredentials
+import com.twitter.finagle.ssl.client.{
+  SslClientConfiguration,
+  SslClientEngineFactory,
+  SslClientSessionVerifier,
+  SslContextClientEngineFactory
+}
+import com.twitter.finagle.transport.Transport
 import com.twitter.util.Duration
-import java.net.{InetSocketAddress, SocketAddress}
 import javax.net.ssl.SSLContext
 
 /**
@@ -16,83 +21,91 @@ import javax.net.ssl.SSLContext
  * @see [[com.twitter.finagle.param.TransportParams]]
  */
 class ClientTransportParams[A <: Stack.Parameterized[A]](self: Stack.Parameterized[A])
-  extends TransportParams(self) {
+    extends TransportParams(self) {
 
   /**
-   * Configures the TCP connection `timeout` of this client (default: 1 second).
+   * Configures the socket connect `timeout` of this client (default: 1 second).
    *
    * The connection timeout is the maximum amount of time a transport is allowed
-   * to spend establishing a TCP connection.
+   * to spend connecting to a remote socket. This does not include an actual session creation
+   * (SSL handshake, HTTP proxy handshake, etc.) only raw socket connect.
    */
   def connectTimeout(timeout: Duration): A =
     self.configured(Transporter.ConnectTimeout(timeout))
 
   /**
-   * Enables the TLS/SSL support (connection encrypting) on this client.
+   * Enables SSL/TLS support (connection encrypting) on this client.
+   */
+  def tls(config: SslClientConfiguration): A =
+    self.configured(Transport.ClientSsl(Some(config)))
+
+  /**
+   * Enables SSL/TLS support (connection encrypting) on this client.
+   */
+  def tls(config: SslClientConfiguration, engineFactory: SslClientEngineFactory): A =
+    self
+      .configured(Transport.ClientSsl(Some(config)))
+      .configured(SslClientEngineFactory.Param(engineFactory))
+
+  /**
+   * Enables SSL/TLS support (connection encrypting) on this client.
+   */
+  def tls(config: SslClientConfiguration, sessionVerifier: SslClientSessionVerifier): A =
+    self
+      .configured(Transport.ClientSsl(Some(config)))
+      .configured(SslClientSessionVerifier.Param(sessionVerifier))
+
+  /**
+   * Enables SSL/TLS support (connection encrypting) on this client.
+   */
+  def tls(
+    config: SslClientConfiguration,
+    engineFactory: SslClientEngineFactory,
+    sessionVerifier: SslClientSessionVerifier
+  ): A =
+    self
+      .configured(Transport.ClientSsl(Some(config)))
+      .configured(SslClientEngineFactory.Param(engineFactory))
+      .configured(SslClientSessionVerifier.Param(sessionVerifier))
+
+  /**
+   * Enables SSL/TLS support (connection encrypting) on this client.
    *
    * @note Given that this uses default [[SSLContext]], all configuration params (trust/key stores)
    *       should be passed as Java system properties.
    */
-  def tls: A = {
-    val socketAddressToEngine: SocketAddress => Engine = {
-      case sa: InetSocketAddress => Ssl.client(sa.getHostName, sa.getPort)
-      case _ => Ssl.client()
-    }
-
+  def tls: A =
     self
-      .configured(Transport.TLSClientEngine(Some(socketAddressToEngine)))
-      .configured(Transport.Tls(TlsConfig.Client))
-  }
+      .configured(Transport.ClientSsl(Some(SslClientConfiguration())))
 
   /**
-   * Enables the TLS/SSL support (connection encrypting) on this client.
+   * Enables SSL/TLS support (connection encrypting) on this client.
    * Hostname verification will be provided against the given `hostname`.
    */
-  def tls(hostname: String): A = {
-    val socketAddressToEngine: SocketAddress => Engine = {
-      case sa: InetSocketAddress => Ssl.client(hostname, sa.getPort)
-      case _ => Ssl.client()
-    }
-
+  def tls(hostname: String): A =
     self
-      .configured(Transport.TLSClientEngine(Some(socketAddressToEngine)))
-      .configured(Transporter.TLSHostname(Some(hostname)))
-      .configured(Transport.Tls(TlsConfig.ClientHostname(hostname)))
-  }
+      .configured(Transport.ClientSsl(Some(SslClientConfiguration(hostname = Some(hostname)))))
 
   /**
-   * Enables the TLS/SSL support (connection encrypting) with no hostname validation
-   * on this client. The TLS/SSL sessions are configured using the given `context`.
+   * Enables SSL/TLS support (connection encrypting) with no hostname validation
+   * on this client. The SSL/TLS are configured using the given `context`.
    *
    * @note It's recommended to not use [[SSLContext]] directly, but rely on Finagle to pick
-   *       the most efficient TLS/SSL implementation available on your platform.
+   *       the most efficient SSL/TLS available on your platform.
    */
-  def tls(context: SSLContext): A = {
-    val socketAddressToEngine: SocketAddress => Engine = {
-      case sa: InetSocketAddress => Ssl.client(context, sa.getHostName, sa.getPort)
-      case _ => Ssl.client(context)
-    }
-
+  def tls(context: SSLContext): A =
     self
-      .configured(Transport.TLSClientEngine(Some(socketAddressToEngine)))
-      .configured(Transport.Tls(TlsConfig.ClientSslContext(context)))
-  }
+      .configured(SslClientEngineFactory.Param(new SslContextClientEngineFactory(context)))
+      .configured(Transport.ClientSsl(Some(SslClientConfiguration())))
 
   /**
    * Enables the TLS/SSL support (connection encrypting) with hostname validation
    * on this client. The TLS/SSL sessions are configured using the given `context`.
    */
-  def tls(context: SSLContext, hostname: String): A = {
-    val socketAddressToEngine: SocketAddress => Engine = {
-      case sa: InetSocketAddress => Ssl.client(context, hostname, sa.getPort)
-      case _ => Ssl.client(context)
-    }
-
+  def tls(context: SSLContext, hostname: String): A =
     self
-      .configured(Transport.TLSClientEngine(Some(socketAddressToEngine)))
-      .configured(Transporter.TLSHostname(Some(hostname)))
-      .configured(Transport.Tls(TlsConfig.ClientSslContextAndHostname(context, hostname)))
-  }
+      .configured(SslClientEngineFactory.Param(new SslContextClientEngineFactory(context)))
+      .configured(Transport.ClientSsl(Some(SslClientConfiguration(hostname = Some(hostname)))))
 
   /**
    * Enables the TLS/SSL support (connection encrypting) with no certificate validation
@@ -102,20 +115,16 @@ class ClientTransportParams[A <: Stack.Parameterized[A]](self: Stack.Parameteriz
    *       idea of TLS/SSL. Use this carefully.
    */
   def tlsWithoutValidation: A = {
-    val socketAddressToEngine: SocketAddress => Engine = {
-      case sa: InetSocketAddress =>
-        Ssl.clientWithoutCertificateValidation(sa.getHostName, sa.getPort)
-      case _ =>
-        Ssl.clientWithoutCertificateValidation()
-    }
-
     self
-      .configured(Transport.TLSClientEngine(Some(socketAddressToEngine)))
-      .configured(Transport.Tls(TlsConfig.ClientNoValidation))
+      .configured(
+        Transport
+          .ClientSsl(Some(SslClientConfiguration(trustCredentials = TrustCredentials.Insecure)))
+      )
   }
 
   /**
-   * Enables TCP tunnelling through HTTP proxy [1] on this client (default: disabled).
+   * Enables TCP tunneling via `HTTP CONNECT` through an HTTP proxy [1] on this client
+   * (default: disabled).
    *
    * TCP tunneling might be used to flow any TCP traffic (not only HTTP), but is mostly used to
    * establish an HTTPS (TLS/SSL over HTTP) connection to a remote HTTP server through a proxy.
@@ -123,17 +132,29 @@ class ClientTransportParams[A <: Stack.Parameterized[A]](self: Stack.Parameteriz
    * When enabled, a Finagle client treats the server it connects to as a proxy server and asks it
    * to proxy the traffic to a given ultimate destination, specified as `host`.
    *
-   * [1]: http://www.web-cache.com/Writings/Internet-Drafts/draft-luotonen-web-proxy-tunneling-01.txt
+   * [1]: https://tools.ietf.org/html/draft-luotonen-web-proxy-tunneling-01
+   *
+   * @param host the ultimate host a proxy server connects to
+   */
+  def httpProxyTo(host: String): A =
+    self.configured(Transporter.HttpProxyTo(Some(host -> None)))
+
+  /**
+   * Enables TCP tunneling via `HTTP CONNECT` through an HTTP proxy [1] on this client
+   * (default: disabled).
+   *
+   * TCP tunneling might be used to flow any TCP traffic (not only HTTP), but is mostly used to
+   * establish an HTTPS (TLS/SSL over HTTP) connection to a remote HTTP server through a proxy.
+   *
+   * When enabled, a Finagle client treats the server it connects to as a proxy server and asks it
+   * to proxy the traffic to a given ultimate destination, specified as `host`.
+   *
+   * [1]: https://tools.ietf.org/html/draft-luotonen-web-proxy-tunneling-01
    *
    * @param host the ultimate host a proxy server connects to
    *
-   * @param credentials optional credentials for a proxy server
-   *
-   * @note This is only enabled for finagle-netty4 right now. Applying this to a Netty 3 based
-   *       client has no effect.
+   * @param credentials credentials for a proxy server
    */
-  def httpProxyTo(
-    host: String,
-    credentials: Option[Transporter.Credentials]
-  ): A = self.configured(Transporter.HttpProxyTo(Some(host -> credentials)))
+  def httpProxyTo(host: String, credentials: Transporter.Credentials): A =
+    self.configured(Transporter.HttpProxyTo(Some(host -> Some(credentials))))
 }

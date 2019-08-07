@@ -3,13 +3,9 @@ package com.twitter.finagle.mysql
 import com.twitter.finagle.mysql.Parameter.NullParameter
 import com.twitter.finagle.mysql.transport.MysqlBuf
 import java.sql.{Date => SQLDate, Timestamp}
-import java.util.{Calendar, Date, TimeZone}
-import org.junit.runner.RunWith
+import java.util.{Calendar, Date}
 import org.scalatest.FunSuite
-import org.scalatest.junit.JUnitRunner
 
-
-@RunWith(classOf[JUnitRunner])
 class SimpleCommandRequestTest extends FunSuite {
   test("encode") {
     val bytes = "table".getBytes
@@ -21,32 +17,70 @@ class SimpleCommandRequestTest extends FunSuite {
   }
 }
 
-@RunWith(classOf[JUnitRunner])
-class HandshakeResponseTest extends FunSuite {
-  val username = Some("username")
-  val password = Some("password")
-  val salt = Array[Byte](70,38,43,66,74,48,79,126,76,66,
-                          70,118,67,40,63,68,120,80,103,54)
-  val req = HandshakeResponse(
-    username,
-    password,
-    Some("test"),
-    Capability(0xfffff6ff),
-    salt,
-    Capability(0xf7ff),
-    Charset.Utf8_general_ci,
-    16777216
-  )
+class SslConnectionRequestTest extends FunSuite {
+  val clientCapabilities: Capability =
+    Capability.baseCapabilities + Capability.ConnectWithDB + Capability.FoundRows
+  val sslClientCapabilities: Capability = clientCapabilities + Capability.SSL
+  val charset: Short = MysqlCharset.Utf8_general_ci
+  val maxPacketSize: Int = 12345678
+
+  test("Fails without SSL capability") {
+    intercept[IllegalArgumentException] {
+      SslConnectionRequest(clientCapabilities, charset, maxPacketSize)
+    }
+  }
+
+  // The remaining tests for `SslConnectionRequest` are very similar
+  // to the tests for the first part of `HandshakeResponse`.
+  val req = SslConnectionRequest(sslClientCapabilities, charset, maxPacketSize)
   val br = MysqlBuf.reader(req.toPacket.body)
 
   test("encode capabilities") {
     val mask = br.readIntLE()
-    assert(mask == 0xfffff6ff)
+    assert(mask == 0x2AE8F)
   }
 
   test("maxPacketSize") {
     val max = br.readIntLE()
-    assert(max == 16777216)
+    assert(max == 12345678)
+  }
+
+  test("charset") {
+    val charset = br.readByte()
+    assert(charset == 33.toByte)
+  }
+
+  test("reserved bytes") {
+    val rbytes = br.take(23)
+    assert(rbytes.forall(_ == 0))
+  }
+
+}
+
+abstract class HandshakeResponseTest extends FunSuite {
+  val username = Some("username")
+  val password = Some("password")
+  val database = Some("test")
+  val salt =
+    Array[Byte](70, 38, 43, 66, 74, 48, 79, 126, 76, 66, 70, 118, 67, 40, 63, 68, 120, 80, 103, 54)
+  val maxPacketSize = 16777216
+
+  protected def clientCapabilities(): Capability = Capability(0xfffff6ff)
+  protected def serverCapabilities(): Capability = Capability(0xf7ff)
+  protected def createHandshakeResponse(): HandshakeResponse
+
+  val req = createHandshakeResponse()
+  val packet = req.toPacket
+  val br = MysqlBuf.reader(packet.body)
+
+  test("encode capabilities") {
+    val mask = br.readIntLE()
+    assert(mask == clientCapabilities().mask)
+  }
+
+  test("maxPacketSize") {
+    val max = br.readIntLE()
+    assert(max == maxPacketSize)
   }
 
   test("charset") {
@@ -68,16 +102,79 @@ class HandshakeResponseTest extends FunSuite {
   }
 }
 
-@RunWith(classOf[JUnitRunner])
+class PlainHandshakeResponseTest extends HandshakeResponseTest {
+  protected def createHandshakeResponse(): HandshakeResponse =
+    PlainHandshakeResponse(
+      username,
+      password,
+      database,
+      clientCapabilities(),
+      salt,
+      serverCapabilities(),
+      MysqlCharset.Utf8_general_ci,
+      maxPacketSize
+    )
+}
+
+class SecureHandshakeResponseTest extends HandshakeResponseTest {
+
+  override protected def serverCapabilities(): Capability =
+    Capability.baseCapabilities + Capability.SSL
+  override protected def clientCapabilities(): Capability =
+    Capability.baseCapabilities + Capability.ConnectWithDB + Capability.FoundRows + Capability.SSL
+
+  protected def createHandshakeResponse(): HandshakeResponse =
+    SecureHandshakeResponse(
+      username,
+      password,
+      database,
+      clientCapabilities(),
+      salt,
+      serverCapabilities(),
+      MysqlCharset.Utf8_general_ci,
+      maxPacketSize
+    )
+
+  test("Fails without client SSL capability") {
+    intercept[IllegalArgumentException] {
+      SecureHandshakeResponse(
+        username,
+        password,
+        database,
+        clientCapabilities() - Capability.SSL,
+        salt,
+        serverCapabilities(),
+        MysqlCharset.Utf8_general_ci,
+        maxPacketSize
+      )
+    }
+  }
+
+  test("Fails without server SSL capability") {
+    intercept[IllegalArgumentException] {
+      SecureHandshakeResponse(
+        username,
+        password,
+        database,
+        clientCapabilities(),
+        salt,
+        serverCapabilities() - Capability.SSL,
+        MysqlCharset.Utf8_general_ci,
+        maxPacketSize
+      )
+    }
+  }
+}
+
 class ExecuteRequestTest extends FunSuite {
   test("null values") {
     val numOfParams = 18
     val nullParams: Array[Parameter] = Array.fill(numOfParams)(null)
     val e = ExecuteRequest(0, nullParams, false)
     val br = MysqlBuf.reader(e.toPacket.body)
-    br.skip(10) // payload header (10bytes)
+    br.skip(10) // payload header (10 bytes)
     br.skip(1) // new params bound flag
-    assert(br.remaining == ((numOfParams+7)/8))
+    assert(br.remaining == ((numOfParams + 7) / 8))
   }
 
   // supported types
@@ -168,11 +265,11 @@ class ExecuteRequestTest extends FunSuite {
     }
 
     test("String") {
-      assert(br.readLengthCodedString(Charset.defaultCharset)== strVal)
+      assert(br.readLengthCodedString(MysqlCharset.defaultCharset) == strVal)
     }
 
     test("Non-Ascii String") {
-      assert(br.readLengthCodedString(Charset.defaultCharset)== nonAsciiStrVal)
+      assert(br.readLengthCodedString(MysqlCharset.defaultCharset) == nonAsciiStrVal)
     }
 
     test("Boolean") {
@@ -203,28 +300,26 @@ class ExecuteRequestTest extends FunSuite {
       assert(br.readDoubleLE() == doubleVal)
     }
 
-    val timestampValueLocal = new TimestampValue(TimeZone.getDefault(), TimeZone.getDefault())
-
     test("java.sql.Timestamp") {
-      val raw = RawValue(Type.Timestamp, Charset.Binary, true, br.readLengthCodedBytes())
-      val timestampValueLocal(ts) = raw
+      val raw = RawValue(Type.Timestamp, MysqlCharset.Binary, true, br.readLengthCodedBytes())
+      val TimestampValue(ts) = raw
       assert(ts == timestamp)
     }
 
     test("java.sql.Date") {
-      val raw = RawValue(Type.Date, Charset.Binary, true, br.readLengthCodedBytes())
+      val raw = RawValue(Type.Date, MysqlCharset.Binary, true, br.readLengthCodedBytes())
       val DateValue(d) = raw
       assert(d.toString == sqlDate.toString)
     }
 
     test("java.util.Date") {
-      val raw = RawValue(Type.DateTime, Charset.Binary, true, br.readLengthCodedBytes())
-      val timestampValueLocal(dt) = raw
+      val raw = RawValue(Type.DateTime, MysqlCharset.Binary, true, br.readLengthCodedBytes())
+      val TimestampValue(dt) = raw
       assert(dt.getTime == timestamp.getTime)
     }
 
     test("StringValue") {
-      assert(br.readLengthCodedString(Charset.defaultCharset)== strVal)
+      assert(br.readLengthCodedString(MysqlCharset.defaultCharset) == strVal)
     }
 
     test("ByteValue") {

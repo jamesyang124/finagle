@@ -1,17 +1,30 @@
 package com.twitter.finagle
 
+import com.twitter.conversions.DurationOps._
+import com.twitter.finagle.service.{ConstantService, FailedService, NilService}
 import com.twitter.util._
-import org.junit.runner.RunWith
 import org.mockito.Matchers._
 import org.mockito.Mockito.{times, verify, when}
 import org.mockito.invocation.InvocationOnMock
 import org.mockito.stubbing.Answer
 import org.scalatest.FunSuite
-import org.scalatest.junit.JUnitRunner
-import org.scalatest.mock.MockitoSugar
+import org.scalatest.mockito.MockitoSugar
 
-@RunWith(classOf[JUnitRunner])
+object ServiceTest {
+
+  class TestServiceFactory extends ServiceFactory[Int, Int] {
+    def apply(conn: ClientConnection): Future[Service[Int, Int]] =
+      Future.value(new ConstantService[Int, Int](Future.value(2)))
+
+    def close(deadline: Time): Future[Unit] = Future.Done
+  }
+
+  def await[A](fa: Future[A], timeout: Duration = 5.seconds): A =
+    Await.result(fa, timeout)
+}
+
 class ServiceTest extends FunSuite with MockitoSugar {
+  import ServiceTest._
 
   test("ServiceProxy should proxy all requests") {
     val service = mock[Service[String, String]]
@@ -44,14 +57,18 @@ class ServiceTest extends FunSuite with MockitoSugar {
 
   test("Service.rescue should wrap NonFatal exceptions in a failed Future") {
     val exc = new IllegalArgumentException
-    val service = Service.mk[String, String] { _ => throw exc }
+    val service = Service.mk[String, String] { _ =>
+      throw exc
+    }
     val rescuedService = Service.rescue(service)
 
     val result = Await.result(rescuedService("ok").liftToTry)
     assert(result.throwable == exc)
 
     val fatalExc = new InterruptedException
-    val service2 = Service.mk[String, String] { _ => throw fatalExc }
+    val service2 = Service.mk[String, String] { _ =>
+      throw fatalExc
+    }
     val rescuedService2 = Service.rescue(service2)
 
     intercept[InterruptedException] {
@@ -59,8 +76,54 @@ class ServiceTest extends FunSuite with MockitoSugar {
     }
   }
 
-  test("ServiceFactory.const should resolve immediately to the given service" +
-    "resolve immediately to the given service") {
+  test("Service.toString") {
+    val constSvc = new ConstantService[Int, Int](Future.value(2))
+    assert(
+      constSvc.toString == "com.twitter.finagle.service.ConstantService(ConstFuture(Return(2)))"
+    )
+
+    val constSvcFactory = ServiceFactory.const(constSvc)
+    assert(
+      constSvcFactory.toString == "com.twitter.finagle.service.ConstantService(ConstFuture(Return(2)))"
+    )
+
+    val failedSvc = new FailedService(new Exception("test"))
+    assert(
+      failedSvc.toString == "com.twitter.finagle.service.FailedService(java.lang.Exception: test)"
+    )
+
+    assert(NilService.toString == "com.twitter.finagle.service.NilService$")
+
+    val mkSvc = Service.mk[Int, Int] { x: Int =>
+      Future.value(x + 1)
+    }
+    assert(mkSvc.toString == "com.twitter.finagle.Service$$anon$2")
+
+    val proxied = new ServiceProxy(constSvc) {}
+    assert(
+      proxied.toString == "com.twitter.finagle.service.ConstantService(ConstFuture(Return(2)))"
+    )
+
+    val proxiedWithToString = new ServiceProxy(constSvc) {
+      override def toString: String = "ProxiedService"
+    }
+    assert(proxiedWithToString.toString == "ProxiedService")
+
+    val svcFactory = new TestServiceFactory
+    assert(svcFactory.toString == "com.twitter.finagle.ServiceTest$TestServiceFactory")
+
+    val svcFactoryWithToString = new ServiceFactory[Int, Int] {
+      def apply(conn: ClientConnection): Future[Service[Int, Int]] = Future.value(constSvc)
+      def close(deadline: Time): Future[Unit] = Future.Done
+      override def toString: String = "ServiceFactory"
+    }
+    assert(svcFactoryWithToString.toString == "ServiceFactory")
+  }
+
+  test(
+    "ServiceFactory.const should resolve immediately to the given service" +
+      "resolve immediately to the given service"
+  ) {
     val service = mock[Service[String, String]]
     when(service.close(any)) thenReturn Future.Done
     when(service("ok")) thenReturn Future.value("ko")
@@ -104,13 +167,14 @@ class ServiceTest extends FunSuite with MockitoSugar {
     var statusCalled = false
 
     val underlyingFactory = new ServiceFactory[Unit, Unit] {
-      def apply(conn: ClientConnection) = Future.value(new Service[Unit, Unit] {
-        def apply(request: Unit): Future[Unit] = Future.Unit
-        override def close(deadline: Time) = {
-          serviceCloseCalled = true
-          Future.Done
-        }
-      })
+      def apply(conn: ClientConnection) =
+        Future.value(new Service[Unit, Unit] {
+          def apply(request: Unit): Future[Unit] = Future.Unit
+          override def close(deadline: Time) = {
+            serviceCloseCalled = true
+            Future.Done
+          }
+        })
       override def close(deadline: Time) = {
         factoryCloseCalled = true
         Future.Done
@@ -122,7 +186,7 @@ class ServiceTest extends FunSuite with MockitoSugar {
     }
   }
 
-  test("FactoryToService closes underlying service after request, does not close factory") (new Ctx {
+  test("FactoryToService closes underlying service after request, does not close factory")(new Ctx {
     val service = new FactoryToService(underlyingFactory)
     Await.result(service(Unit))
 
@@ -130,7 +194,7 @@ class ServiceTest extends FunSuite with MockitoSugar {
     assert(!factoryCloseCalled)
   })
 
-  test("FactoryToService delegates status / close to underlying factory") (new Ctx {
+  test("FactoryToService delegates status / close to underlying factory")(new Ctx {
     val service = new FactoryToService(underlyingFactory)
     service.status
     service.close()
@@ -139,10 +203,9 @@ class ServiceTest extends FunSuite with MockitoSugar {
     assert(factoryCloseCalled)
   })
 
-  test("FactoryToService module delegates isAvailable / close to underlying factory") (new Ctx {
+  test("FactoryToService module delegates isAvailable / close to underlying factory")(new Ctx {
     val stack =
-      FactoryToService.module.toStack(
-        Stack.Leaf(Stack.Role("role"), underlyingFactory))
+      FactoryToService.module.toStack(Stack.leaf(Stack.Role("role"), underlyingFactory))
 
     val factory = stack.make(Stack.Params.empty + FactoryToService.Enabled(true))
 
@@ -153,10 +216,11 @@ class ServiceTest extends FunSuite with MockitoSugar {
     assert(factoryCloseCalled)
   })
 
-  test("FactoryToService around module closes underlying service after request, does not close underlying factory") (new Ctx {
+  test(
+    "FactoryToService around module closes underlying service after request, does not close underlying factory"
+  )(new Ctx {
     val stack =
-      FactoryToService.module.toStack(
-        Stack.Leaf(Stack.Role("role"), underlyingFactory))
+      FactoryToService.module.toStack(Stack.leaf(Stack.Role("role"), underlyingFactory))
 
     val factory = stack.make(Stack.Params.empty + FactoryToService.Enabled(true))
 
@@ -167,18 +231,51 @@ class ServiceTest extends FunSuite with MockitoSugar {
     assert(!factoryCloseCalled)
   })
 
-  test("FactoryToService around module delegates isAvailable / close to underlying factory") (new Ctx {
-    val stack =
-      FactoryToService.module.toStack(
-        Stack.Leaf(Stack.Role("role"), underlyingFactory))
+  test("FactoryToService around module delegates isAvailable / close to underlying factory")(
+    new Ctx {
+      val stack =
+        FactoryToService.module.toStack(Stack.leaf(Stack.Role("role"), underlyingFactory))
 
-    val factory = stack.make(Stack.Params.empty + FactoryToService.Enabled(true))
+      val factory = stack.make(Stack.Params.empty + FactoryToService.Enabled(true))
 
-    val service = new FactoryToService(factory)
-    service.status
-    service.close()
+      val service = new FactoryToService(factory)
+      service.status
+      service.close()
 
-    assert(statusCalled)
-    assert(factoryCloseCalled)
-  })
+      assert(statusCalled)
+      assert(factoryCloseCalled)
+    }
+  )
+
+  test("pending: apply") {
+    val ok = Service.const(Future.value("ok"))
+    val boo = Service.const(Future.exception(new Exception("boo")))
+
+    assert(await(Service.pending(Future.value(ok))(1)) == "ok")
+    intercept[Exception] { await(Service.pending(Future.value(boo))(1)) }
+  }
+
+  test("pending: close") {
+    var closeCalled: Boolean = false
+    val underlying = new Service[Int, Int] {
+      def apply(req: Int): Future[Int] = Future.value(0)
+      override def close(deadline: Time): Future[Unit] = {
+        closeCalled = true
+        Future.Done
+      }
+    }
+
+    val promise = new Promise[Service[Int, Int]]
+    val svc = Service.pending(promise)
+    assert(svc.status == Status.Busy)
+
+    val rep = svc(1)
+    val closed = svc.close()
+    assert(closed.isDefined)
+    assert(rep.isDefined)
+    assert(svc.status == Status.Closed)
+
+    promise.setValue(underlying)
+    assert(closeCalled)
+  }
 }

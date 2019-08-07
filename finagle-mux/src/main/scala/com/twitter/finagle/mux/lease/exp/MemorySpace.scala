@@ -1,6 +1,6 @@
 package com.twitter.finagle.mux.lease.exp
 
-import com.twitter.conversions.storage.longToStorageUnitableWholeNumber
+import com.twitter.conversions.StorageUnitOps._
 import com.twitter.util.StorageUnit
 
 /**
@@ -16,8 +16,7 @@ private[lease] class MemorySpace(
   maxDiscount: StorageUnit,
   rSnooper: RequestSnooper,
   lr: LogsReceiver,
-  rnd: GenerationalRandom
-) {
+  rnd: GenerationalRandom) {
   def this(
     info: JvmInfo,
     minDiscount: StorageUnit,
@@ -32,7 +31,6 @@ private[lease] class MemorySpace(
     maxDiscount: StorageUnit,
     rSnooper: RequestSnooper
   ) = this(info, minDiscount, maxDiscount, rSnooper, NullLogsReceiver)
-
 
   private[this] val printableZeroBytes = 0.bytes.toString
 

@@ -1,7 +1,9 @@
 package com.twitter.finagle.http2.param
 
+import com.twitter.conversions.StorageUnitOps._
 import com.twitter.finagle.Stack
 import com.twitter.util.StorageUnit
+import io.netty.handler.codec.http2.Http2MultiplexCodec
 
 /**
  * A class eligible for configuring whether to use the http/2 "prior knowledge"
@@ -18,7 +20,6 @@ object PriorKnowledge {
   implicit val param = Stack.Param(PriorKnowledge(false))
 }
 
-
 /**
  * A class for configuring overrides to the default headerTableSize setting.
  */
@@ -31,19 +32,20 @@ object HeaderTableSize {
   implicit val param = Stack.Param(HeaderTableSize(None))
 }
 
-
 /**
- *  A class for configuring overrides to the default pushEnabled setting.
+ * A class for configuring overrides to the default pushEnabled setting.
+ *
+ * Marked as private because finagle doesn't support it yet.  Right now
+ * the default of, "Do not use push promises" is the only supported mode.
  */
-case class PushEnabled(pushEnabled: Option[Boolean]) {
+private[http2] case class PushEnabled(pushEnabled: Option[Boolean]) {
   def mk(): (PushEnabled, Stack.Param[PushEnabled]) =
     (this, PushEnabled.param)
 }
 
-object PushEnabled {
-  implicit val param = Stack.Param(PushEnabled(None))
+private[http2] object PushEnabled {
+  implicit val param = Stack.Param(PushEnabled(Some(false)))
 }
-
 
 /**
  * A class for configuring overrides to the default maxConcurrentStreams setting.
@@ -57,7 +59,6 @@ object MaxConcurrentStreams {
   implicit val param = Stack.Param(MaxConcurrentStreams(None))
 }
 
-
 /**
  * A class for configuring overrides to the default initialWindowSize setting.
  */
@@ -69,7 +70,6 @@ case class InitialWindowSize(initialWindowSize: Option[StorageUnit]) {
 object InitialWindowSize {
   implicit val param = Stack.Param(InitialWindowSize(None))
 }
-
 
 /**
  * A class for configuring overrides to the default maxFrameSize setting.
@@ -83,19 +83,19 @@ object MaxFrameSize {
   implicit val param = Stack.Param(MaxFrameSize(None))
 }
 
-
 /**
  * A class for configuring overrides to the default maxHeaderListSize setting.
  */
-case class MaxHeaderListSize(maxHeaderListSize: Option[StorageUnit]) {
+case class MaxHeaderListSize(maxHeaderListSize: StorageUnit) {
   def mk(): (MaxHeaderListSize, Stack.Param[MaxHeaderListSize]) =
     (this, MaxHeaderListSize.param)
 }
 
 object MaxHeaderListSize {
-  implicit val param = Stack.Param(MaxHeaderListSize(None))
+  // TODO: revert to 8.kilobytes after we resolve https://github.com/netty/netty/issues/7511
+  // Netty is double counting header names right now.
+  implicit val param = Stack.Param(MaxHeaderListSize(16.kilobytes))
 }
-
 
 /**
  * A class for configuring the http/2 encoder to ignore MaxHeaderListSize.
@@ -109,4 +109,83 @@ case class EncoderIgnoreMaxHeaderListSize(ignoreMaxHeaderListSize: Boolean) {
 
 object EncoderIgnoreMaxHeaderListSize {
   implicit val param = Stack.Param(EncoderIgnoreMaxHeaderListSize(false))
+}
+
+/**
+ * A class for configuring the http/2 encoder to mark a header entry as
+ * sensitive or not.
+ *
+ * Entries marked as sensitive will never be cached, and will be encoded as
+ * literals, either with a static huffman encoding or in cleartext.
+ */
+case class HeaderSensitivity(sensitivityDetector: (CharSequence, CharSequence) => Boolean) {
+  def mk(): (HeaderSensitivity, Stack.Param[HeaderSensitivity]) =
+    (this, HeaderSensitivity.param)
+}
+
+object HeaderSensitivity {
+  val NeverSensitive: (CharSequence, CharSequence) => Boolean =
+    new Function2[CharSequence, CharSequence, Boolean] {
+      def apply(name: CharSequence, value: CharSequence): Boolean = false
+
+      override def toString(): String = "NEVER_SENSITIVE"
+    }
+  val AlwaysSensitive: (CharSequence, CharSequence) => Boolean =
+    new Function2[CharSequence, CharSequence, Boolean] {
+      def apply(name: CharSequence, value: CharSequence): Boolean = true
+
+      override def toString(): String = "ALWAYS_SENSITIVE"
+    }
+
+  implicit val param = Stack.Param(HeaderSensitivity(NeverSensitive))
+}
+
+/**
+ * Whether or not HTTP/2 frame logging is enabled.
+ *
+ * Defaults to disabled.
+ *
+ * @see `Enabled` and `Disabled` on companion class for getting instances.
+ */
+final case class FrameLogging private (enabled: Boolean) {
+  def mk(): (FrameLogging, Stack.Param[FrameLogging]) =
+    (this, FrameLogging.param)
+}
+
+object FrameLogging {
+
+  /**
+   * Frame logging is disabled.
+   */
+  val Disabled: FrameLogging = FrameLogging(false)
+
+  /**
+   * Frame logging is enabled.
+   *
+   * @see [[FrameLoggerNamePrefix]] for further configuration.
+   */
+  val Enabled: FrameLogging = FrameLogging(true)
+
+  implicit val param: Stack.Param[FrameLogging] = Stack.Param(Disabled)
+}
+
+/**
+ * The logger name to be used for the root HTTP/2 frame logger. This allows each frame type
+ * to be turned on and off by changing the level of prefix.<FRAME_TYPE>, or turning everything
+ * on by changing the level of prefix. The HTTP/2 frame logger logs at the level TRACE, so you
+ * must set logger to that level to see the frame logs. The prefix if not set defaults to
+ * io.netty.handler.codec.http2.Http2MultiplexCodec
+ *
+ * @param loggerNamePrefix The name of the logger to be used as the root logger name for
+ *                         netty HTTP/2 frame logging.
+ */
+case class FrameLoggerNamePrefix(loggerNamePrefix: String) {
+  def mk(): (FrameLoggerNamePrefix, Stack.Param[FrameLoggerNamePrefix]) =
+    (this, FrameLoggerNamePrefix.param)
+}
+
+object FrameLoggerNamePrefix {
+  private[this] val DefaultFrameLoggerPrefix: String = classOf[Http2MultiplexCodec].getName()
+
+  implicit val param = Stack.Param(FrameLoggerNamePrefix(DefaultFrameLoggerPrefix))
 }

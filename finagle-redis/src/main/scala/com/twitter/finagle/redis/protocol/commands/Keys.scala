@@ -1,8 +1,9 @@
 package com.twitter.finagle.redis.protocol
 
 import com.twitter.io.Buf
-import com.twitter.util.Time
+import com.twitter.util.{Duration, Time}
 import java.lang.{Long => JLong}
+import java.net.InetSocketAddress
 
 case class Del(keys: Seq[Buf]) extends StrictKeysCommand {
   def name: Buf = Command.DEL
@@ -31,6 +32,22 @@ case class Keys(pattern: Buf) extends Command {
 
   def name: Buf = Command.KEYS
   override def body: Seq[Buf] = Seq(pattern)
+}
+
+case class Migrate(addr: InetSocketAddress, keys: Seq[Buf], timeout: Duration) extends Command {
+  def name: Buf = Command.MIGRATE
+  override def body: Seq[Buf] = {
+    val ip = Buf.Utf8(addr.getAddress.getHostAddress)
+    val port = Buf.Utf8(addr.getPort.toString)
+    Seq(
+      ip,
+      port,
+      Buf.Utf8(""),
+      Buf.Utf8("0"),
+      Buf.Utf8(timeout.inMilliseconds.toString),
+      Command.KEYS
+    ) ++ keys
+  }
 }
 
 case class Move(key: Buf, db: Buf) extends StrictKeyCommand {
@@ -77,7 +94,7 @@ case class RenameNx(key: Buf, newkey: Buf) extends StrictKeyCommand {
 }
 
 case class Scan(cursor: Long, count: Option[JLong] = None, pattern: Option[Buf] = None)
-  extends Command {
+    extends Command {
 
   def name: Buf = Command.SCAN
   override def body: Seq[Buf] = {
@@ -85,12 +102,12 @@ case class Scan(cursor: Long, count: Option[JLong] = None, pattern: Option[Buf] 
 
     val withCount = count match {
       case Some(count) => bufs ++ Seq(Command.COUNT, Buf.Utf8(count.toString))
-      case None        => bufs
+      case None => bufs
     }
 
     pattern match {
-      case Some(pattern) => withCount ++ Seq(Command.PATTERN, pattern)
-      case None          => withCount
+      case Some(pattern) => withCount ++ Seq(Command.MATCH, pattern)
+      case None => withCount
     }
   }
 }

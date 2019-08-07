@@ -15,7 +15,7 @@ class testnamer extends Namer {
 @RunWith(classOf[JUnitRunner])
 class DefaultInterpreterTest extends FunSuite {
 
-  def assertEval(dtab: Dtab, path: String, expected: Name.Bound*) {
+  def assertEval(dtab: Dtab, path: String, expected: Name.Bound*): Unit = {
     DefaultInterpreter.bind(dtab, Path.read(path)).sample().eval match {
       case Some(actual) => assert(actual.map(_.addr.sample) == expected.map(_.addr.sample).toSet)
       case _ => assert(false)
@@ -23,7 +23,10 @@ class DefaultInterpreterTest extends FunSuite {
   }
 
   def boundWithWeight(weight: Double, addrs: Address*): Name.Bound =
-    Name.Bound(Var.value(Addr.Bound(addrs.toSet, Addr.Metadata(AddrWeightKey -> weight))), addrs.toSet)
+    Name.Bound(
+      Var.value(Addr.Bound(addrs.toSet, Addr.Metadata(AddrWeightKey -> weight))),
+      addrs.toSet
+    )
 
   test("basic dtab evaluation") {
     val dtab = Dtab.read("/foo=>/$/inet/8080")
@@ -60,7 +63,9 @@ class DefaultInterpreterTest extends FunSuite {
       /booz => ~
     """)
 
-    assertEval(dtab, "/foo",
+    assertEval(
+      dtab,
+      "/foo",
       boundWithWeight(3.0, Address(8080)),
       boundWithWeight(2.0, Address(9090)),
       boundWithWeight(1.0, Address(7070))

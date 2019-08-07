@@ -1,20 +1,29 @@
 package com.twitter.finagle.client
 
+import com.twitter.finagle.socks._
 import com.twitter.finagle.{Address, Stack}
-import com.twitter.finagle.socks.SocksProxyFlags
-import com.twitter.finagle.transport.Transport
-import com.twitter.util.Duration
-import com.twitter.util.Future
-import java.net.SocketAddress
+import com.twitter.finagle.transport.{Transport, TransportContext}
+import com.twitter.util.{Duration, Future}
+import java.net.{InetSocketAddress, SocketAddress}
 
 /**
- * Transporters are simple functions from a `SocketAddress` to a
- * `Future[Transport[In, Out]]`. They represent a transport layer session from a
- * client to a server. Transporters are symmetric to the server-side
- * [[com.twitter.finagle.server.Listener]].
+ * Transporters construct a `Future[Transport[In, Out, Context]]`.
+ *
+ * There is one Transporter assigned per remote peer.  Transporters are
+ * symmetric to the server-side [[com.twitter.finagle.server.Listener]], except
+ * that it isn't shared across remote peers..
  */
-trait Transporter[In, Out] {
-  def apply(addr: SocketAddress): Future[Transport[In, Out]]
+trait Transporter[In, Out, Ctx <: TransportContext] {
+  def apply(): Future[
+    Transport[In, Out] {
+      type Context <: Ctx
+    }
+  ]
+
+  /**
+   * The address of the remote peer that this `Transporter` connects to.
+   */
+  def remoteAddress: SocketAddress
 }
 
 /**
@@ -24,7 +33,7 @@ trait Transporter[In, Out] {
  * @define $param a [[com.twitter.finagle.Stack.Param]] used to configure
  */
 object Transporter {
-  import com.twitter.conversions.time._
+  import com.twitter.conversions.DurationOps._
 
   /**
    * $param a `SocketAddress` that a `Transporter` connects to.
@@ -56,54 +65,96 @@ object Transporter {
   }
 
   /**
-   * $param hostname verification, if TLS is enabled.
-   * @see [[com.twitter.finagle.transport.Transport#TLSEngine]]
-   */
-  case class TLSHostname(hostname: Option[String]) {
-    def mk(): (TLSHostname, Stack.Param[TLSHostname]) =
-      (this, TLSHostname.param)
-  }
-  object TLSHostname {
-    implicit val param = Stack.Param(TLSHostname(None))
-  }
-
-  /**
    * $param a SocksProxy as the endpoint for a `Transporter`.
    */
-  case class SocksProxy(sa: Option[SocketAddress], credentials: Option[(String, String)]) {
+  case class SocksProxy(
+    sa: Option[SocketAddress],
+    credentials: Option[(String, String)],
+    bypassLocalhost: Boolean = true) {
     def mk(): (SocksProxy, Stack.Param[SocksProxy]) =
-      (this, SocksProxy.param)
+      (this, SocksProxy)
   }
-  object SocksProxy {
-    implicit val param = Stack.Param(SocksProxy(
-      SocksProxyFlags.socksProxy,
-      SocksProxyFlags.socksUsernameAndPassword
-    ))
+  implicit object SocksProxy extends Stack.Param[SocksProxy] {
+
+    private[this] def socksProxy: Option[SocketAddress] =
+      (socksProxyHost.get, socksProxyPort.get) match {
+        case (Some(host), Some(port)) => Some(new InetSocketAddress(host, port))
+        case _ => None
+      }
+
+    private[this] def socksUsernameAndPassword: Option[(String, String)] =
+      (socksUsernameFlag.get, socksPasswordFlag.get) match {
+        case (Some(username), Some(password)) => Some((username, password))
+        case _ => None
+      }
+
+    val default: SocksProxy =
+      SocksProxy(socksProxy, socksUsernameAndPassword, !socksProxyForLocalhost())
+
+    override def show(p: SocksProxy): Seq[(String, () => String)] = {
+      // do not show the password for security reasons
+      Seq(
+        ("socketAddress", () => p.sa.toString),
+        (
+          "credentials",
+          () =>
+            p.credentials
+              .map(c => s"username=${c._1}")
+              .toString
+        )
+      )
+    }
   }
 
   /**
    * $param a HttpProxy as the endpoint for a `Transporter`.
-   * @see http://www.w3.org/Protocols/rfc2616/rfc2616-sec9.html#9.9
+   * @see https://www.w3.org/Protocols/rfc2616/rfc2616-sec9.html#9.9
    */
   case class HttpProxy(sa: Option[SocketAddress], credentials: Option[Credentials]) {
     def mk(): (HttpProxy, Stack.Param[HttpProxy]) =
-      (this, HttpProxy.param)
+      (this, HttpProxy)
 
     def this(sa: Option[SocketAddress]) = this(sa, None)
   }
-  object HttpProxy {
-    implicit val param = Stack.Param(HttpProxy(None, None))
+  implicit object HttpProxy extends Stack.Param[HttpProxy] {
+    val default: HttpProxy = HttpProxy(None, None)
+
+    override def show(p: HttpProxy): Seq[(String, () => String)] = {
+      // do not show the password for security reasons
+      Seq(
+        ("socketAddress", () => p.sa.toString),
+        ("credentials", () => p.credentials.map(_.toStringNoPassword).toString)
+      )
+    }
   }
 
   case class HttpProxyTo(hostAndCredentials: Option[(String, Option[Credentials])])
-  object HttpProxyTo {
-    implicit val param = Stack.Param(HttpProxyTo(None))
+  implicit object HttpProxyTo extends Stack.Param[HttpProxyTo] {
+    val default: HttpProxyTo = HttpProxyTo(None)
+
+    override def show(p: HttpProxyTo): Seq[(String, () => String)] = {
+      // do not show the password for security reasons
+      Seq(
+        ("host", () => p.hostAndCredentials.map(_._1).toString),
+        (
+          "credentials",
+          () =>
+            p.hostAndCredentials
+              .flatMap(_._2)
+              .map(_.toStringNoPassword)
+              .toString
+        )
+      )
+    }
   }
 
   /**
    * This class wraps the username, password that we use for http proxy auth
    */
-  case class Credentials(username: String, password: String)
+  case class Credentials(username: String, password: String) {
+    private[Transporter] def toStringNoPassword: String =
+      s"Credentials(username=$username)"
+  }
 
   /**
    * Configures the traffic class to be used by clients.

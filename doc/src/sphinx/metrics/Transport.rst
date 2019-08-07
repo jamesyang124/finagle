@@ -1,5 +1,5 @@
-ChannelConnector
-<<<<<<<<<<<<<<<<
+Netty Transporter
+<<<<<<<<<<<<<<<<<
 
 **connect_latency_ms**
   A histogram of the length of time it takes for a connection to succeed,
@@ -43,13 +43,13 @@ ChannelStatsHandler
   "connection_duration", "connection_received_bytes", or "connection_sent_bytes"
   histograms.
 
-**connection_duration**
-  A histogram of the duration of the lifetime of a connection.
+**connection_duration** `verbosity:debug`
+  A histogram of the duration of the lifetime of a connection, in milliseconds.
 
-**connection_received_bytes**
+**connection_received_bytes** `verbosity:debug`
   A histogram of the number of bytes received over the lifetime of a connection.
 
-**connection_sent_bytes**
+**connection_sent_bytes** `verbosity:debug`
   A histogram of the number of bytes sent over the lifetime of a connection.
 
 **received_bytes**
@@ -58,19 +58,36 @@ ChannelStatsHandler
 **sent_bytes**
   A counter of the total number of sent bytes.
 
-**writableDuration**
+**tcp_retransmits** `verbosity:debug`
+  A counter of the number of TCP retransmits that have occurred.
+
+**tcp_send_window_size** `verbosity:debug`
+  A histogram of the TCP send window size (in bytes) per channel.
+
+**writableDuration** `verbosity:debug`
   A gauge of the length of time the socket has been writable in the channel.
 
-**unwritableDuration**
+**unwritableDuration** `verbosity:debug`
   A gauge of the length of time the socket has been unwritable in the channel.
 
 **connections**
   A gauge of the total number of connections that are currently open in the
   channel.
 
+**pending_io_events**
+  A gauge of the number of pending IO events enqueued in all event loops servicing
+  this client or server. If this metric climbs up, it indicates an overload scenario
+  when IO threads are not being able to process the scheduled work (handling new
+  requests and new connections). A very typical cause of these symptoms is either
+  blocking or running a CPU intensive workloads on IO threads.
+
 **exn/<exception_name>+**
   A counter of the number of times a specific exception has been thrown within
   a Netty pipeline.
+
+**tls/connections**
+  A gauge of the total number of SSL/TLS connections that are currently open in
+  the channel.
 
 IdleChannelHandler
 <<<<<<<<<<<<<<<<<<
@@ -79,25 +96,11 @@ IdleChannelHandler
   A counter of the number of times a connection was disconnected because of a
   given idle state.
 
-Thrift
-<<<<<<
+SSL/TLS
+<<<<<<<
 
-**srv/thrift/buffer/resetCount**
-  A counter for the number of times the thrift server re-initialized the buffer
-  for thrift responses. The thrift server maintains a growable reusable buffer
-  for responses. Once the buffer reaches the threshold size it is discarded and
-  reset to a smaller size. This is done to accommodate variable response sizes.
-  A high resetCount means the server is allocating and releasing memory
-  frequently. Use the ``com.twitter.finagle.Thrift.param.MaxReusableBufferSize``
-  param to set the max buffer size to the size of a typical thrift response for
-  your server.
+**handshake_latency_ms**
+   A histogram of the tls handshake latency in milliseconds.
 
-RecvBufferSizeStatsHandler (when Netty 4 pooling is enabled)
-<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<
-
-**transport/receive_buffer_bytes**
-  A histogram of the receive buffer size in bytes. This metric is useful when
-  it comes to tuning pooling of receive buffers in ``finagle-netty4`` (can be enabled
-  with a flag: `-com.twitter.finagle.netty.poolReceiveBuffers`). For maximum throughput,
-  pool's chunk size should be bigger than ``receive_buffer_bytes.max`` of any client/server
-  running on a given JVM.
+**failed_handshake_latency_ms** `verbosity:debug`
+   A histogram of the failed tls handshake latency in milliseconds.

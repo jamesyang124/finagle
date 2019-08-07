@@ -5,19 +5,19 @@ import com.twitter.util.Duration
 import scala.io.Source
 
 private object LatencyProfile {
-  val rng = Rng("seed".hashCode)
+  val rng: Rng = Rng("seed".hashCode)
 
   /**
    * Creates a latency profile from a file where each line
    * represents recorded latencies.
    */
   def fromFile(path: java.net.URL): () => Duration = {
-    val latencies = Source.fromURL(path).getLines.toIndexedSeq map {
-      line: String => Duration.fromNanoseconds((line.toDouble*1000000).toLong)
+    val latencies = Source.fromURL(path).getLines.toIndexedSeq.map { line: String =>
+      Duration.fromNanoseconds((line.toDouble * 1000000).toLong)
     }
-    val size = latencies.size
-    var i = rng.nextInt(size)
-    () => { i = i + 1; latencies(i%size) }
+
+    () =>
+      latencies(rng.nextInt(latencies.size))
   }
 
   /**
@@ -26,7 +26,8 @@ private object LatencyProfile {
    */
   def between(low: Duration, high: Duration): () => Duration = {
     require(low <= high)
-    () => low + ((high - low) * math.random)
+    () =>
+      low + ((high - low) * math.random)
   }
 
   /**
@@ -57,18 +58,21 @@ private object LatencyProfile {
    * Creates a function that applies the probability distribution in
    * `dist` over the latency functions in `latencies`.
    */
-  def apply(
-    dist: Seq[Double],
-    latencies: IndexedSeq[() => Duration]
-  ): () => Duration = {
+  def apply(dist: Seq[Double], latencies: IndexedSeq[() => Duration]): () => Duration = {
     val drv = Drv(dist)
-    () => latencies(drv(rng))()
+    () =>
+      latencies(drv(rng))()
   }
 }
 
+/**
+ * Creates a profile to determine the latency for the next
+ * incoming request.
+ */
 private class LatencyProfile(stopWatch: () => Duration) {
+
   /** Increase latency returned from `next` by `factor`. */
-  def slowBy(factor: Long)(next: () => Duration) = () => { next()*factor }
+  def slowBy(factor: Long)(next: () => Duration) = () => { next() * factor }
 
   /**
    * Increases the latency returned from `next` by `factor` while `stopWatch` is
@@ -76,7 +80,7 @@ private class LatencyProfile(stopWatch: () => Duration) {
    */
   def slowWithin(start: Duration, end: Duration, factor: Long)(next: () => Duration) = () => {
     val time = stopWatch()
-    if (time >= start && time <= end) next()*factor else next()
+    if (time >= start && time <= end) next() * factor else next()
   }
 
   /**
@@ -85,7 +89,7 @@ private class LatencyProfile(stopWatch: () => Duration) {
    */
   def warmup(end: Duration, maxFactor: Double = 5.0)(next: () => Duration) = () => {
     val time = stopWatch()
-    val factor = if (time < end) (1.0/time.inNanoseconds)*(end.inNanoseconds) else 1.0
-    Duration.fromNanoseconds((next().inNanoseconds*factor.min(maxFactor)).toLong)
+    val factor = if (time < end) (1.0 / time.inNanoseconds) * (end.inNanoseconds) else 1.0
+    Duration.fromNanoseconds((next().inNanoseconds * factor.min(maxFactor)).toLong)
   }
 }

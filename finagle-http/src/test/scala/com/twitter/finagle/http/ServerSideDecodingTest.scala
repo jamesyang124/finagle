@@ -1,6 +1,6 @@
 package com.twitter.finagle.http
 
-import com.twitter.conversions.time._
+import com.twitter.conversions.DurationOps._
 import com.twitter.finagle
 import com.twitter.finagle.Service
 import com.twitter.finagle.builder.ClientBuilder
@@ -9,11 +9,8 @@ import com.twitter.util.{Await, Closable, Future}
 import java.io.{ByteArrayOutputStream, OutputStream, PrintStream}
 import java.net.InetSocketAddress
 import java.util.zip.{DeflaterOutputStream, GZIPOutputStream}
-import org.jboss.netty.handler.codec.http.HttpHeaders
-import org.junit.runner.RunWith
 import org.scalacheck.{Arbitrary, Gen}
 import org.scalatest.FunSuite
-import org.scalatest.junit.JUnitRunner
 import org.scalatest.prop.GeneratorDrivenPropertyChecks
 
 /**
@@ -24,9 +21,7 @@ import org.scalatest.prop.GeneratorDrivenPropertyChecks
  * compression is currently made problematic by netty
  * (see https://github.com/netty/netty/issues/4970).
  */
-@RunWith(classOf[JUnitRunner])
-class ServerSideDecodingTest extends FunSuite
-                                     with GeneratorDrivenPropertyChecks {
+class ServerSideDecodingTest extends FunSuite with GeneratorDrivenPropertyChecks {
   // Helper class - might be overkill to have a sum type for just one test, but
   // it makes it simple to provide an Arbitrary instance for encoders and to
   // make the actual test that much more readable.
@@ -43,15 +38,15 @@ class ServerSideDecodingTest extends FunSuite
     }
   }
 
-  case object Gzip extends Encoder(HttpHeaders.Values.GZIP) {
+  case object Gzip extends Encoder("gzip") {
     override def encodeWith(out: OutputStream) = new GZIPOutputStream(out)
   }
 
-  case object Deflate extends Encoder(HttpHeaders.Values.DEFLATE) {
+  case object Deflate extends Encoder("deflate") {
     override def encodeWith(out: OutputStream) = new DeflaterOutputStream(out)
   }
 
-  case object Identity extends Encoder(HttpHeaders.Values.IDENTITY) {
+  case object Identity extends Encoder("identity") {
     override def encodeWith(out: OutputStream) = out
   }
 
@@ -63,17 +58,20 @@ class ServerSideDecodingTest extends FunSuite
     val server = finagle.Http.server
       .withLabel("server")
       .withDecompression(true)
-      .serve("localhost:*", new Service[Request, Response] {
-        def apply(request: Request) = {
-          val response = Response()
-          response.contentString = request.contentString
-          Future.value(response)
+      .serve(
+        "localhost:*",
+        new Service[Request, Response] {
+          def apply(request: Request) = {
+            val response = Response()
+            response.contentString = request.contentString
+            Future.value(response)
+          }
         }
-      })
+      )
 
     // Standard client
     val client = ClientBuilder()
-      .codec(Http())
+      .stack(finagle.Http.client)
       .hosts(Seq(server.boundAddress.asInstanceOf[InetSocketAddress]))
       .hostConnectionLimit(1)
       .build()

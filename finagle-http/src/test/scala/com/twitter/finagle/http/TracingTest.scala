@@ -1,6 +1,6 @@
 package com.twitter.finagle.http
 
-import com.twitter.conversions.time._
+import com.twitter.conversions.DurationOps._
 import com.twitter.finagle.Service
 import com.twitter.finagle.tracing.{Flags, SpanId, Trace, TraceId}
 import com.twitter.util.{Await, Future}
@@ -11,13 +11,14 @@ import org.scalatest.junit.JUnitRunner
 import org.scalatest.prop.GeneratorDrivenPropertyChecks
 
 @RunWith(classOf[JUnitRunner])
-class TracingTest extends FunSuite
-  with GeneratorDrivenPropertyChecks {
+class TracingTest extends FunSuite with GeneratorDrivenPropertyChecks {
 
   import HttpTracing.{Header, stripParameters}
 
   lazy val flags = Flags().setDebug
   lazy val traceId = TraceId(Some(SpanId(1)), None, SpanId(2), Some(true), flags)
+  lazy val traceId128Bit =
+    TraceId(Some(SpanId(2L)), None, SpanId(2), Some(true), flags, Some(SpanId(1L)))
 
   test("set header") {
     Trace.letId(traceId) {
@@ -61,6 +62,46 @@ class TracingTest extends FunSuite
     req.headerMap.add(Header.TraceId, "0000000000000001")
     req.headerMap.add(Header.SpanId, "0000000000000002")
     req.headerMap.add(Header.Sampled, "true")
+    req.headerMap.add(Header.Flags, "1")
+    val res = TraceInfo.letTraceIdFromRequestHeaders(req) {
+      svc(req)
+    }
+    assert(Status.Ok == Await.result(res, 5.seconds).status)
+  }
+
+  test("parse header (128-bit TraceIDs)") {
+    val svc = new Service[Request, Response] {
+      def apply(request: Request): Future[Response] = {
+        assert(Trace.id == traceId128Bit)
+        assert(Trace.id.flags == flags)
+        Future.value(Response())
+      }
+    }
+
+    val req = Request("/test.json")
+    req.headerMap.add(Header.TraceId, "00000000000000010000000000000002")
+    req.headerMap.add(Header.SpanId, "0000000000000002")
+    req.headerMap.add(Header.Sampled, "true")
+    req.headerMap.add(Header.Flags, "1")
+    val res = TraceInfo.letTraceIdFromRequestHeaders(req) {
+      svc(req)
+    }
+    assert(Status.Ok == Await.result(res, 5.seconds).status)
+  }
+
+  test("parse header with sampled as 1") {
+    val svc = new Service[Request, Response] {
+      def apply(request: Request): Future[Response] = {
+        assert(Trace.id == traceId)
+        assert(Trace.id.flags == flags)
+        Future.value(Response())
+      }
+    }
+
+    val req = Request("/test.json")
+    req.headerMap.add(Header.TraceId, "0000000000000001")
+    req.headerMap.add(Header.SpanId, "0000000000000002")
+    req.headerMap.add(Header.Sampled, "1")
     req.headerMap.add(Header.Flags, "1")
     val res = TraceInfo.letTraceIdFromRequestHeaders(req) {
       svc(req)

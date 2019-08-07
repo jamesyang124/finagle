@@ -10,10 +10,6 @@ Deadline Admission Control
   A stat of the elapsed time since expiry if a deadline has expired, in
   milliseconds.
 
-**admission_control/deadline/transit_latency_ms**
-  A stat that attempts to measure (wall time) transit times between hops, e.g.,
-  from client to server. Be aware that clock drift between hosts, stop the world
-  pauses, and queue backups can contribute here. Not supported by all protocols.
 
 Nack Admission Control
 <<<<<<<<<<<<<<<<<<<<<<
@@ -26,6 +22,9 @@ These metrics reflect the behavior of the
 **dropped_requests**
   A counter of the number of requests probabilistically dropped.
 
-**accept_probability**
-  A histogram of the filter's estimated probability of a request not being
-  nacked.
+**nonretryable**
+  A counter of the number of requests that were deemed non-retryable and thus
+  were not passed through the set of nack admission filters.
+
+**ema_value**
+  A gauge of the EMA value. Between 0 and 100, inclusive.

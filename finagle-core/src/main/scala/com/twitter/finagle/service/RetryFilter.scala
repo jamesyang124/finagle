@@ -1,12 +1,12 @@
 package com.twitter.finagle.service
 
-import com.twitter.conversions.time._
-import com.twitter.finagle.{Failure, Filter, Service}
+import com.twitter.conversions.DurationOps._
+import com.twitter.finagle.{FailureFlags, Filter, Service}
 import com.twitter.finagle.Filter.TypeAgnostic
-import com.twitter.finagle.param.HighResTimer
-import com.twitter.finagle.stats.{StatsReceiver, NullStatsReceiver}
+import com.twitter.finagle.stats.{NullStatsReceiver, StatsReceiver}
 import com.twitter.finagle.tracing.Trace
-import com.twitter.util.{Function => _, _}
+import com.twitter.finagle.param.HighResTimer
+import com.twitter.util._
 
 object RetryingService {
 
@@ -37,11 +37,11 @@ object RetryingService {
  *      for more details.
  */
 class RetryFilter[Req, Rep](
-    retryPolicy: RetryPolicy[(Req, Try[Rep])],
-    timer: Timer,
-    statsReceiver: StatsReceiver,
-    retryBudget: RetryBudget)
-  extends Filter[Req, Rep, Req, Rep] {
+  retryPolicy: RetryPolicy[(Req, Try[Rep])],
+  timer: Timer,
+  statsReceiver: StatsReceiver,
+  retryBudget: RetryBudget)
+    extends Filter[Req, Rep, Req, Rep] {
 
   /**
    * A [[com.twitter.finagle.Filter]] that coordinates retries of subsequent
@@ -52,20 +52,17 @@ class RetryFilter[Req, Rep](
    * @note consider using a [[Timer]] with high resolution so that there is
    * less correlation between retries. For example [[HighResTimer.Default]].
    */
-  def this(
-    retryPolicy: RetryPolicy[(Req, Try[Rep])],
-    timer: Timer,
-    statsReceiver: StatsReceiver
-  ) = this(
-    retryPolicy,
-    timer,
-    statsReceiver,
-    RetryBudget()
-  )
+  def this(retryPolicy: RetryPolicy[(Req, Try[Rep])], timer: Timer, statsReceiver: StatsReceiver) =
+    this(
+      retryPolicy,
+      timer,
+      statsReceiver,
+      RetryBudget()
+    )
 
   // Respect non-retryablity regardless of which filter is used
   private[this] val filteredPolicy: RetryPolicy[(Req, Try[Rep])] = retryPolicy.filterEach {
-    case (_, Throw(f: Failure)) if f.isFlagged(Failure.NonRetryable) => false
+    case (_, Throw(f: FailureFlags[_])) if f.isFlagged(FailureFlags.NonRetryable) => false
     case _ => true
   }
 
@@ -103,7 +100,7 @@ class RetryFilter[Req, Rep](
           } else {
             budgetExhausted.incr()
             retriesStat.add(count)
-            svcRep
+            svcRep.transform(FailureFlags.asNonRetryable)
           }
         case None =>
           retriesStat.add(count)
@@ -129,8 +126,7 @@ object RetryFilter {
   def apply[Req, Rep](
     backoffs: Stream[Duration],
     statsReceiver: StatsReceiver = NullStatsReceiver
-  )(
-    shouldRetry: PartialFunction[(Req, Try[Rep]), Boolean]
+  )(shouldRetry: PartialFunction[(Req, Try[Rep]), Boolean]
   )(
     implicit timer: Timer
   ): RetryFilter[Req, Rep] =
@@ -154,16 +150,16 @@ object RetryFilter {
  * responses as well as failures.
  */
 final class RetryExceptionsFilter[Req, Rep](
-    retryPolicy: RetryPolicy[Try[Nothing]],
-    timer: Timer,
-    statsReceiver: StatsReceiver,
-    retryBudget: RetryBudget)
-  extends RetryFilter[Req, Rep](
-    RetryPolicy.convertExceptionPolicy(retryPolicy),
-    timer,
-    statsReceiver,
-    retryBudget)
-{
+  retryPolicy: RetryPolicy[Try[Nothing]],
+  timer: Timer,
+  statsReceiver: StatsReceiver,
+  retryBudget: RetryBudget)
+    extends RetryFilter[Req, Rep](
+      RetryPolicy.convertExceptionPolicy(retryPolicy),
+      timer,
+      statsReceiver,
+      retryBudget
+    ) {
 
   /**
    * A [[com.twitter.finagle.Filter]] that coordinates retries of subsequent
@@ -200,15 +196,15 @@ object RetryExceptionsFilter {
   def apply[Req, Rep](
     backoffs: Stream[Duration],
     statsReceiver: StatsReceiver = NullStatsReceiver
-  )(
-    shouldRetry: PartialFunction[Try[Nothing], Boolean]
+  )(shouldRetry: PartialFunction[Try[Nothing], Boolean]
   )(
     implicit timer: Timer
   ): RetryExceptionsFilter[Req, Rep] =
     new RetryExceptionsFilter[Req, Rep](
       RetryPolicy.backoff(backoffs)(shouldRetry),
       timer,
-      statsReceiver)
+      statsReceiver
+    )
 
   def typeAgnostic(
     retryPolicy: RetryPolicy[Try[Nothing]],

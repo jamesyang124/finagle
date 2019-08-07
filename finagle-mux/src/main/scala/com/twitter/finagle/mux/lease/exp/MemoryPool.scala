@@ -2,7 +2,7 @@ package com.twitter.finagle.mux.lease.exp
 
 import java.lang.management.{GarbageCollectorMXBean, MemoryPoolMXBean, MemoryUsage}
 import javax.management.ObjectName
-import com.twitter.conversions.storage.longToStorageUnitableWholeNumber
+import com.twitter.conversions.StorageUnitOps._
 import com.twitter.util.StorageUnit
 
 private[lease] trait MemoryPool {
@@ -15,7 +15,7 @@ private[lease] class BeanMemoryPool(pool: MemoryPoolMXBean) extends MemoryPool {
 
 private[lease] class FakeMemoryPool(original: MemoryPoolInfo) extends MemoryPool {
   @volatile private[this] var _snapshot: MemoryPoolInfo = original
-  def setSnapshot(snap: MemoryPoolInfo) {
+  def setSnapshot(snap: MemoryPoolInfo): Unit = {
     _snapshot = snap
   }
 
@@ -24,12 +24,12 @@ private[lease] class FakeMemoryPool(original: MemoryPoolInfo) extends MemoryPool
 
 private[lease] class FakeGarbageCollectorMXBean(
   @volatile var getCollectionCount: Long,
-  @volatile var getCollectionTime: Long
-) extends GarbageCollectorMXBean {
+  @volatile var getCollectionTime: Long)
+    extends GarbageCollectorMXBean {
   private[this] def ??? = throw new UnsupportedOperationException("not supported")
 
   def getMemoryPoolNames(): Array[String] = ???
-  def isValid  = true
+  def isValid = true
   def getName: String = ???
   def getObjectName: ObjectName = ???
 }
@@ -44,7 +44,8 @@ private[lease] class MemoryUsageInfo(usage: MemoryUsage) extends MemoryPoolInfo 
   def committed(): StorageUnit = usage.getCommitted().bytes
 }
 
-private[lease] case class FakeMemoryUsage(used: StorageUnit, committed: StorageUnit) extends MemoryPoolInfo
+private[lease] case class FakeMemoryUsage(used: StorageUnit, committed: StorageUnit)
+    extends MemoryPoolInfo
 
 private[lease] class JvmInfo(val pool: MemoryPool, val collector: GarbageCollectorMXBean) {
   def committed(): StorageUnit = pool.snapshot().committed()
@@ -56,7 +57,7 @@ private[lease] class JvmInfo(val pool: MemoryPool, val collector: GarbageCollect
     snap.committed() - snap.used()
   }
 
-  def record(lr: LogsReceiver, state: String) {
+  def record(lr: LogsReceiver, state: String): Unit = {
     val snap = pool.snapshot()
 
     lr.record("com_%s".format(state), snap.committed().toString)
@@ -65,5 +66,6 @@ private[lease] class JvmInfo(val pool: MemoryPool, val collector: GarbageCollect
     lr.record("gen_%s".format(state), generation().toString)
   }
 
-  override def toString(): String = "JvmInfo(committed" + committed() + ", generation=" + generation() + ", used=" + used() + ", remaining=" + remaining() + ")"
+  override def toString(): String =
+    "JvmInfo(committed" + committed() + ", generation=" + generation() + ", used=" + used() + ", remaining=" + remaining() + ")"
 }

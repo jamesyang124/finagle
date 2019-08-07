@@ -6,14 +6,18 @@ import org.junit.Assume;
 import org.junit.Before;
 import org.junit.Test;
 
+import com.twitter.finagle.Address;
+import com.twitter.finagle.Addresses;
+import com.twitter.finagle.Memcached;
+import com.twitter.finagle.Names;
 import com.twitter.finagle.Service;
-import com.twitter.finagle.builder.ClientBuilder;
-import com.twitter.finagle.memcached.java.Client;
-import com.twitter.finagle.memcached.java.ClientBase;
+import com.twitter.finagle.memcached.JavaClient;
+import com.twitter.finagle.memcached.JavaClientBase;
+import com.twitter.finagle.memcached.integration.external.TestMemcachedServer;
+import com.twitter.finagle.memcached.integration.external.TestMemcachedServer$;
 import com.twitter.finagle.memcached.protocol.Command;
 import com.twitter.finagle.memcached.protocol.Response;
-import com.twitter.finagle.memcached.protocol.text.Memcached;
-import com.twitter.io.Buf;
+import com.twitter.io.Bufs;
 import com.twitter.util.Await;
 
 import static org.junit.Assert.assertEquals;
@@ -32,18 +36,16 @@ public class TestClient {
    */
   @Test
   public void testGetAndSet() throws Exception {
-    Service<Command, Response> service =
-      ClientBuilder.safeBuild(
-        ClientBuilder
-          .get()
-          .hosts(server.get().address())
-          .codec(new Memcached())
-          .hostConnectionLimit(1));
+    Address addr = Addresses.newInetAddress(server.get().address());
 
-    Client client = ClientBase.newInstance(service);
+    Service<Command, Response> service = Memcached.client()
+          .connectionsPerEndpoint(1)
+          .newService(Names.bound(addr), "memcached");
+
+    JavaClient client = JavaClientBase.newInstance(service);
     Await.ready(client.set("foo", "bar"));
 
-    Option<String> res = Buf.Utf8$.MODULE$.unapply(Await.result(client.get("foo")));
+    Option<String> res = Bufs.UTF_8.unapply(Await.result(client.get("foo")));
     assertEquals("bar", res.get());
   }
 }

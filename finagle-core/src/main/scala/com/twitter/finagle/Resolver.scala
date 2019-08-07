@@ -3,7 +3,6 @@ package com.twitter.finagle
 import com.twitter.finagle.util._
 import com.twitter.logging.Logger
 import com.twitter.util._
-import java.net.SocketAddress
 import scala.util.control.NoStackTrace
 
 /**
@@ -15,8 +14,10 @@ import scala.util.control.NoStackTrace
  * on the classpath that define a Resolver for the given scheme.
  */
 class ResolverNotFoundException(scheme: String)
-  extends Exception(
-    "Resolver not found for scheme \"%s\". Please add the jar containing this resolver to your classpath".format(scheme))
+    extends Exception(
+      "Resolver not found for scheme \"%s\". Please add the jar containing this resolver to your classpath"
+        .format(scheme)
+    )
 
 /**
  * Indicates that multiple [[com.twitter.finagle.Resolver Resolvers]] were
@@ -27,12 +28,13 @@ class ResolverNotFoundException(scheme: String)
  * libraries on the classpath with conflicting scheme definitions.
  */
 class MultipleResolversPerSchemeException(resolvers: Map[String, Seq[Resolver]])
-  extends Exception with NoStackTrace
-{
+    extends Exception
+    with NoStackTrace {
   override def getMessage = {
-    val msgs = resolvers map { case (scheme, rs) =>
-      "%s=(%s)".format(scheme, rs.map(_.getClass.getName).mkString(", "))
-    } mkString(" ")
+    val msgs = resolvers map {
+      case (scheme, rs) =>
+        "%s=(%s)".format(scheme, rs.map(_.getClass.getName).mkString(", "))
+    } mkString (" ")
     "Multiple resolvers defined: %s".format(msgs)
   }
 }
@@ -45,7 +47,7 @@ class MultipleResolversPerSchemeException(resolvers: Map[String, Seq[Resolver]])
  * [1] https://twitter.github.io/finagle/guide/Names.html
  */
 class ResolverAddressInvalid(addr: String)
-  extends Exception("Resolver address \"%s\" is not valid".format(addr))
+    extends Exception("Resolver address \"%s\" is not valid".format(addr))
 
 /**
  * A resolver binds a name, represented by a string, to a
@@ -59,19 +61,12 @@ class ResolverAddressInvalid(addr: String)
  * 0-arg constructor must be registered in a file named
  * `META-INF/services/com.twitter.finagle.Resolver` included in the classpath; see
  * Oracle's
- * [[http://docs.oracle.com/javase/6/docs/api/java/util/ServiceLoader.html ServiceLoader]]
+ * [[https://docs.oracle.com/javase/6/docs/api/java/util/ServiceLoader.html ServiceLoader]]
  * documentation for further details.
  */
 trait Resolver {
   val scheme: String
   def bind(arg: String): Var[Addr]
-
-  @deprecated("Use Resolver.bind", "6.7.x")
-  final def resolve(name: String): Try[Group[SocketAddress]] =
-    bind(name) match {
-      case Var.Sampled(Addr.Failed(e)) => Throw(e)
-      case va => Return(Group.fromVarAddr(va))
-    }
 }
 
 /**
@@ -134,40 +129,10 @@ private[finagle] abstract class BaseResolver(f: () => Seq[Resolver]) {
     s.foldLeft(List[Token]()) {
       case (ts, '=') => Eq :: ts
       case (ts, '!') => Bang :: ts
-      case (El(s) :: ts, c) => El(s+c) :: ts
-      case (ts, c) => El(""+c) :: ts
+      case (El(s) :: ts, c) => El(s + c) :: ts
+      case (ts, c) => El("" + c) :: ts
     }
   }.reverse
-
-  /**
-   * Resolve a group from an address, a string. Resolve uses
-   * `Resolver`s to do this. These are loaded via the Java
-   * [[http://docs.oracle.com/javase/6/docs/api/java/util/ServiceLoader.html ServiceLoader]]
-   * mechanism. The default resolver is "inet", resolving DNS
-   * name/port pairs.
-   *
-   * Target names have a simple grammar: The name of the resolver
-   * precedes the name of the address to be resolved, separated by
-   * an exclamation mark ("bang"). For example: inet!twitter.com:80
-   * resolves the name "twitter.com:80" using the "inet" resolver. If no
-   * resolver name is present, the inet resolver is used.
-   *
-   * Names resolved by this mechanism are also a
-   * [[com.twitter.finagle.LabelledGroup]]. By default, this name is
-   * simply the `addr` string, but it can be overridden by prefixing
-   * a name separated by an equals sign from the rest of the addr.
-   * For example, the addr "www=inet!google.com:80" resolves
-   * "google.com:80" with the inet resolver, but the returned group's
-   * [[com.twitter.finagle.LabelledGroup]] name is "www".
-   */
-  @deprecated("Use Resolver.eval", "6.7.x")
-  def resolve(addr: String): Try[Group[SocketAddress]] =
-    Try { eval(addr) } flatMap {
-      case Name.Path(_) =>
-        Throw(new IllegalArgumentException("Resolver.resolve does not support logical names"))
-      case bound@Name.Bound(_) =>
-        Return(NameGroup(bound))
-    }
 
   /**
    * Parse and evaluate the argument into a Name. Eval parses
@@ -196,7 +161,7 @@ private[finagle] abstract class BaseResolver(f: () => Seq[Resolver]) {
 
         case El(scheme) :: Bang :: name =>
           resolvers.find(_.scheme == scheme) match {
-            case Some(resolver) =>  (resolver, delex(name))
+            case Some(resolver) => (resolver, delex(name))
             case None => throw new ResolverNotFoundException(scheme)
           }
 

@@ -1,21 +1,20 @@
 package com.twitter.finagle.mux.transport
 
-import com.twitter.finagle.Failure
-import com.twitter.finagle.util.{BufWriter, BufReader}
-import com.twitter.io.Buf
+import com.twitter.finagle.FailureFlags
+import com.twitter.io.{Buf, BufByteWriter, ByteReader}
 
-private[mux] object MuxFailure {
+private[finagle] object MuxFailure {
   private val ContextId = Buf.Utf8("MuxFailure")
 
   /**
    * Indicates that it is safe to re-issue the work.
-   * Translates to [[com.twitter.finagle.Failure.Restartable]]
+   * Translates to [[com.twitter.finagle.FailureFlags.Retryable]]
    */
-  val Restartable: Long = 1L << 0
+  val Retryable: Long = 1L << 0
 
   /**
    * Indicates that the request was rejected without being attempted.
-   * Translates to [[com.twitter.finagle.Failure.Rejected]]
+   * Translates to [[com.twitter.finagle.FailureFlags.Rejected]]
    */
   val Rejected: Long = 1L << 1
 
@@ -24,16 +23,17 @@ private[mux] object MuxFailure {
    */
   val NonRetryable: Long = 1L << 2
 
-
   /**
    * A MuxFailure that contains no additional information
    */
-  val Empty = MuxFailure(0L)
+  val Empty: MuxFailure = MuxFailure(0L)
 
   private val Extractor: PartialFunction[(Buf, Buf), MuxFailure] = {
     // Ignore anything after the first 8 bytes for future use
     case (k, vBuf) if k.equals(ContextId) && vBuf.length >= 8 =>
-      MuxFailure(BufReader(vBuf).readLongBE())
+      val br = ByteReader(vBuf)
+      try MuxFailure(br.readLongBE())
+      finally br.close()
   }
 
   /**
@@ -44,22 +44,27 @@ private[mux] object MuxFailure {
   }
 
   /**
-   * Generate a [[MuxFailure]] from a Throwable. If it is a
+   * Mask that covers representable mux failures.
+   *
+   * Note that this uses the FailureFlags representations of the failures, so
+   * it can be used with FailureFlags for checking whether any of them match
+   * MuxFailure failures, but cannot be used for checking MuxFailure failures.
+   */
+  private[this] val Mask: Long =
+    FailureFlags.Retryable | FailureFlags.Rejected | FailureFlags.NonRetryable
+
+  /**
+   * Generate a [[MuxFailure]] from a Throwable where possible. If it is a
    * [[com.twitter.finagle.Failure]], then flags which have [[MuxFailure]]
    * analogs will be translated.
    */
-  def fromThrow(exc: Throwable): MuxFailure = {
-    exc match {
-      case f: Failure =>
-        var flags = 0L
-        if (f.isFlagged(Failure.Restartable)) flags |= Restartable
-        if (f.isFlagged(Failure.Rejected)) flags |= Rejected
-        if (f.isFlagged(Failure.NonRetryable)) flags |= NonRetryable
-        MuxFailure(flags)
-
-      case _ =>
-        Empty
-    }
+  val FromThrow: PartialFunction[Throwable, MuxFailure] = {
+    case f: FailureFlags[_] if (f.flags & Mask) != 0 =>
+      var flags = 0L
+      if (f.isFlagged(FailureFlags.Retryable)) flags |= Retryable
+      if (f.isFlagged(FailureFlags.Rejected)) flags |= Rejected
+      if (f.isFlagged(FailureFlags.NonRetryable)) flags |= NonRetryable
+      MuxFailure(flags)
   }
 }
 
@@ -76,8 +81,8 @@ private[mux] object MuxFailure {
 private[mux] case class MuxFailure(flags: Long) {
   import MuxFailure._
 
-  if (isFlagged(Restartable) && isFlagged(NonRetryable)) {
-    assert(false, "Cannot be both Restartable and NonRetryable")
+  if (isFlagged(Retryable) && isFlagged(NonRetryable)) {
+    assert(false, "Cannot be both Retryable and NonRetryable")
   }
 
   def isFlagged(which: Long): Boolean = (flags & which) == which
@@ -86,16 +91,16 @@ private[mux] case class MuxFailure(flags: Long) {
    * Generate [[com.twitter.finagle.Failure]] flags. Only flags which have
    * [[com.twitter.finagle.Failure]] flag analogs will be translated.
    *
-   * @see [[com.twitter.finagle.Failure.NonRetryable]],
-   *      [[com.twitter.finagle.Failure.Restartable]],
-   *      [[com.twitter.finagle.Failure.Rejected]]
+   * @see [[com.twitter.finagle.FailureFlags.NonRetryable]],
+   *      [[com.twitter.finagle.FailureFlags.Retryable]],
+   *      [[com.twitter.finagle.FailureFlags.Rejected]]
    */
   def finagleFlags: Long = {
     var finagleFlags = 0L
 
-    if (isFlagged(NonRetryable)) finagleFlags |= Failure.NonRetryable
-    if (isFlagged(Restartable)) finagleFlags |= Failure.Restartable
-    if (isFlagged(Rejected)) finagleFlags |= Failure.Rejected
+    if (isFlagged(NonRetryable)) finagleFlags |= FailureFlags.NonRetryable
+    if (isFlagged(Retryable)) finagleFlags |= FailureFlags.Retryable
+    if (isFlagged(Rejected)) finagleFlags |= FailureFlags.Rejected
 
     finagleFlags
   }
@@ -108,6 +113,6 @@ private[mux] case class MuxFailure(flags: Long) {
    */
   def contexts: Seq[(Buf, Buf)] = {
     if (this == Empty) Nil
-    else Seq((ContextId, BufWriter.fixed(8).writeLongBE(flags).owned()))
+    else Seq((ContextId, BufByteWriter.fixed(8).writeLongBE(flags).owned()))
   }
 }

@@ -1,32 +1,24 @@
 package com.twitter.finagle.server
 
-import com.twitter.conversions.time._
 import com.twitter.finagle._
 import com.twitter.finagle.filter._
 import com.twitter.finagle.param._
-import com.twitter.finagle.service.{ExpiringService, DeadlineStatsFilter, StatsFilter, TimeoutFilter}
-import com.twitter.finagle.stack.Endpoint
-import com.twitter.finagle.Stack.{Role, Param}
+import com.twitter.finagle.service.{DeadlineFilter, ExpiringService, StatsFilter, TimeoutFilter}
+import com.twitter.finagle.{StackTransformer, Stack}
 import com.twitter.finagle.stats.ServerStatsReceiver
 import com.twitter.finagle.tracing._
-import com.twitter.finagle.transport.Transport
 import com.twitter.jvm.Jvm
-import com.twitter.util.registry.GlobalRegistry
-import com.twitter.util.{Closable, CloseAwaitably, Future, Return, Throw, Time}
-import java.net.SocketAddress
-import java.util.Collections
-import java.util.concurrent.ConcurrentHashMap
-import scala.collection.JavaConverters._
+import scala.collection.immutable
 
 object StackServer {
-
   private[this] lazy val newJvmFilter = new MkJvmFilter(Jvm())
 
-  private[this] class JvmTracing[Req, Rep] extends Stack.Module1[param.Tracer, ServiceFactory[Req, Rep]] {
-    override def role: Role = Role.jvmTracing
-    override def description: String = "Server-side JVM tracing"
-    override def make(_tracer: param.Tracer, next: ServiceFactory[Req, Rep]): ServiceFactory[Req, Rep] = {
-      val param.Tracer(tracer) = _tracer
+  private[this] class JvmTracing[Req, Rep]
+      extends Stack.Module1[param.Tracer, ServiceFactory[Req, Rep]] {
+    def role: Stack.Role = Role.jvmTracing
+    def description: String = "Server-side JVM tracing"
+    def make(_tracer: param.Tracer, next: ServiceFactory[Req, Rep]): ServiceFactory[Req, Rep] = {
+      val tracer = _tracer.tracer
       if (tracer.isNull) next
       else newJvmFilter[Req, Rep].andThen(next)
     }
@@ -36,11 +28,11 @@ object StackServer {
    * Canonical Roles for each Server-related Stack modules.
    */
   object Role extends Stack.Role("StackServer") {
-    val serverDestTracing = Stack.Role("ServerDestTracing")
-    val jvmTracing = Stack.Role("JvmTracing")
-    val preparer = Stack.Role("preparer")
-    val protoTracing = Stack.Role("protoTracing")
-   }
+    val serverDestTracing: Stack.Role = Stack.Role("ServerDestTracing")
+    val jvmTracing: Stack.Role = Stack.Role("JvmTracing")
+    val preparer: Stack.Role = Stack.Role("preparer")
+    val protoTracing: Stack.Role = Stack.Role("protoTracing")
+  }
 
   /**
    * Creates a default finagle server [[com.twitter.finagle.Stack]].
@@ -48,9 +40,10 @@ object StackServer {
    * in the finagle package object ([[com.twitter.finagle.param]]) and specific
    * params defined in the companion objects of the respective modules.
    *
+   * @see [[com.twitter.finagle.filter.OffloadFilter]]
    * @see [[com.twitter.finagle.tracing.ServerDestTracingProxy]]
    * @see [[com.twitter.finagle.service.TimeoutFilter]]
-   * @see [[com.twitter.finagle.service.DeadlineStatsFilter]]
+   * @see [[com.twitter.finagle.service.DeadlineFilter]]
    * @see [[com.twitter.finagle.filter.DtabStatsFilter]]
    * @see [[com.twitter.finagle.service.StatsFilter]]
    * @see [[com.twitter.finagle.filter.RequestSemaphoreFilter]]
@@ -60,31 +53,59 @@ object StackServer {
    * @see [[com.twitter.finagle.tracing.TraceInitializerFilter]]
    * @see [[com.twitter.finagle.filter.MonitorFilter]]
    * @see [[com.twitter.finagle.filter.ServerStatsFilter]]
+   * @see [[com.twitter.finagle.tracing.WireTracingFilter]]
    */
   def newStack[Req, Rep]: Stack[ServiceFactory[Req, Rep]] = {
     val stk = new StackBuilder[ServiceFactory[Req, Rep]](stack.nilStack[Req, Rep])
+
+    // This module is placed at the bottom of the stack and shifts Future execution context
+    // from IO threads into a configured FuturePool right before user-defined Service.apply is
+    // being called.
+    stk.push(OffloadFilter.server)
+
+    stk.push(ServerTracingFilter.module)
+
+    // this goes near the listener so it is close to where the handling happens.
+    stk.push(ThreadUsage.module)
+
+    // `ExportSslUsage` exports the TLS parameter to the R* Registry
+    stk.push(ExportSslUsage.module)
 
     // We want to start expiring services as close to their instantiation
     // as possible. By installing `ExpiringService` here, we are guaranteed
     // to wrap the server's dispatcher.
     stk.push(ExpiringService.server)
-    stk.push(Role.serverDestTracing, ((next: ServiceFactory[Req, Rep]) =>
-      new ServerDestTracingProxy[Req, Rep](next)))
+    stk.push(
+      Role.serverDestTracing,
+      (next: ServiceFactory[Req, Rep]) => new ServerDestTracingProxy[Req, Rep](next)
+    )
     stk.push(TimeoutFilter.serverModule)
-    stk.push(DeadlineStatsFilter.module)
+    // The DeadlineFilter is pushed before the stats filters so stats are
+    // recorded for the request. If a server processing deadlines is set in
+    // TimeoutFilter, the deadline will start from the current time, and
+    // therefore not be expired if the request were to then pass through
+    // DeadlineFilter. Thus, DeadlineFilter is pushed after TimeoutFilter.
+    stk.push(DeadlineFilter.module)
     stk.push(DtabStatsFilter.module)
-    // Admission Control filters are inserted after `StatsFilter` so that rejected
+    // Admission Control filters are inserted before `StatsFilter` so that rejected
     // requests are counted. We may need to adjust how latency are recorded
     // to exclude Nack response from latency stats, CSL-2306.
     stk.push(ServerAdmissionControl.module)
+    stk.push(ConcurrentRequestFilter.module)
     stk.push(StatsFilter.module)
-    stk.push(RequestSemaphoreFilter.module)
     stk.push(MaskCancelFilter.module)
     stk.push(ExceptionSourceFilter.module)
     stk.push(new JvmTracing)
     stk.push(ServerStatsFilter.module)
     stk.push(Role.protoTracing, identity[ServiceFactory[Req, Rep]](_))
-    stk.push(ServerTracingFilter.module)
+    // `WriteTracingFilter` annotates traced requests. Annotations are timestamped
+    // so this should be low in the stack to accurately delineate between wire time
+    // and handling time. Ideally this would live closer to the "wire" in the netty
+    // pipeline but we do not have the appropriate hooks to do so with a properly
+    // initialized context. Actually having these annotations still has value in
+    // allowing us to provide a complimentary annotation to the Client WR/WS as well
+    // as measure queueing within the server via ConcurrentRequestFilter.
+    stk.push(WireTracingFilter.serverModule)
     stk.push(Role.preparer, identity[ServiceFactory[Req, Rep]](_))
     // The TraceInitializerFilter must be pushed after most other modules so that
     // any Tracing produced by those modules is enclosed in the appropriate
@@ -99,220 +120,92 @@ object StackServer {
    */
   val defaultParams: Stack.Params =
     Stack.Params.empty + Stats(ServerStatsReceiver)
-}
 
-/**
- * A [[com.twitter.finagle.Server Server]] that is
- * parameterized.
- */
-trait StackBasedServer[Req, Rep]
-  extends Server[Req, Rep]
-  with Stack.Parameterized[StackBasedServer[Req, Rep]]
+  /**
+   * A set of StackTransformers for transforming server stacks.
+   */
+  private[finagle] object DefaultTransformer {
+    @volatile private var underlying = immutable.Queue.empty[StackTransformer]
+
+    def append(transformer: StackTransformer): Unit =
+      synchronized { underlying = underlying :+ transformer }
+
+    def transformers: Seq[StackTransformer] =
+      underlying
+  }
+}
 
 /**
  * A [[com.twitter.finagle.Server]] that composes a
  * [[com.twitter.finagle.Stack]].
+ *
+ * @see [[ListeningServer]] for a template implementation that tracks session resources.
  */
 trait StackServer[Req, Rep]
-  extends StackBasedServer[Req, Rep]
-  with Stack.Parameterized[StackServer[Req, Rep]] {
+    extends StackBasedServer[Req, Rep]
+    with Stack.Parameterized[StackServer[Req, Rep]]
+    with Stack.Transformable[StackServer[Req, Rep]] {
+
+  /**
+   * @see [[withStack]]
+   */
+  def transformed(t: Stack.Transformer): StackServer[Req, Rep] =
+    withStack(t(stack))
 
   /** The current stack used in this StackServer. */
   def stack: Stack[ServiceFactory[Req, Rep]]
-  /** The current parameter map used in this StackServer */
+
+  /** The current parameter map used in this StackServer. */
   def params: Stack.Params
-  /** A new StackServer with the provided Stack. */
+
+  /**
+   *
+   * A new [[StackServer]] with the provided [[Stack]].
+   *
+   * @see `withStack` that takes a `Function1` for a more ergonomic
+   *     API when used with method chaining.
+   */
   def withStack(stack: Stack[ServiceFactory[Req, Rep]]): StackServer[Req, Rep]
+
+  /**
+   * A new [[StackServer]] using the function to create a new [[Stack]].
+   *
+   * The input to `fn` is the [[stack client's current stack]].
+   * This API allows for easier usage when writing code that
+   * uses method chaining.
+   *
+   * This method is similar to [[transformed]] while providing easier API
+   * ergonomics for one-off `Stack` changes.
+   *
+   * @example
+   * From Scala:
+   * {{{
+   * import com.twitter.finagle.Http
+   *
+   * Http.server.withStack(_.prepend(MyStackModule))
+   * }}}
+   *
+   * From Java:
+   * {{{
+   * import com.twitter.finagle.Http;
+   * import static com.twitter.util.Function.func;
+   *
+   * Http.server().withStack(func(stack -> stack.prepend(MyStackModule)));
+   * }}}
+   *
+   * @see [[withStack(Stack)]]
+   * @see [[transformed]]
+   */
+  def withStack(
+    fn: Stack[ServiceFactory[Req, Rep]] => Stack[ServiceFactory[Req, Rep]]
+  ): StackServer[Req, Rep] =
+    withStack(fn(stack))
 
   def withParams(ps: Stack.Params): StackServer[Req, Rep]
 
-  override def configured[P: Param](p: P): StackServer[Req, Rep]
+  override def configured[P: Stack.Param](p: P): StackServer[Req, Rep]
 
-  override def configured[P](psp: (P, Param[P])): StackServer[Req, Rep]
-}
+  override def configured[P](psp: (P, Stack.Param[P])): StackServer[Req, Rep]
 
-/**
- * A standard template implementation for
- * [[com.twitter.finagle.server.StackServer]].
- *
- * @see The [[http://twitter.github.io/finagle/guide/Servers.html user guide]]
- *      for further details on Finagle servers and their configuration.
- *
- * @see [[StackServer.newStack]] for the default modules used by Finagle
- *      servers.
- */
-trait StdStackServer[Req, Rep, This <: StdStackServer[Req, Rep, This]]
-  extends StackServer[Req, Rep]
-  with Stack.Parameterized[This]
-  with CommonParams[This]
-  with WithServerTransport[This]
-  with WithServerSession[This]
-  with WithServerAdmissionControl[This] { self =>
-
-  /**
-   * The type we write into the transport.
-   */
-  protected type In
-
-  /**
-   * The type we read out of the transport.
-   */
-  protected type Out
-
-  /**
-   * Defines a typed [[com.twitter.finagle.server.Listener]] for this server.
-   * Concrete StackServer implementations are expected to specify this.
-   */
-  protected def newListener(): Listener[In, Out]
-
-  /**
-   * Defines a dispatcher, a function which binds a transport to a
-   * [[com.twitter.finagle.Service]]. Together with a `Listener`, it
-   * forms the foundation of a finagle server. Concrete implementations
-   * are expected to specify this.
-   *
-   * @see [[com.twitter.finagle.dispatch.GenSerialServerDispatcher]]
-   */
-  protected def newDispatcher(transport: Transport[In, Out], service: Service[Req, Rep]): Closable
-
-  /**
-   * Creates a new StackServer with parameter `p`.
-   */
-  override def configured[P: Stack.Param](p: P): This =
-    withParams(params + p)
-
-  /**
-   * Creates a new StackServer with parameter `psp._1` and Stack Param type `psp._2`.
-   */
-  override def configured[P](psp: (P, Stack.Param[P])): This = {
-    val (p, sp) = psp
-    configured(p)(sp)
-  }
-
-  /**
-   * Creates a new StackServer with `params` used to configure this StackServer's `stack`.
-   */
-  def withParams(params: Stack.Params): This =
-    copy1(params = params)
-
-  def withStack(stack: Stack[ServiceFactory[Req, Rep]]): This =
-    copy1(stack = stack)
-
-  /**
-   * A copy constructor in lieu of defining StackServer as a
-   * case class.
-   */
-  protected def copy1(
-    stack: Stack[ServiceFactory[Req, Rep]] = this.stack,
-    params: Stack.Params = this.params
-  ): This { type In = self.In; type Out = self.Out }
-
-  def serve(addr: SocketAddress, factory: ServiceFactory[Req, Rep]): ListeningServer =
-    new ListeningServer with CloseAwaitably {
-      // Ensure that we have performed global initialization.
-      com.twitter.finagle.Init()
-
-      val Monitor(monitor) = params[Monitor]
-      val Reporter(reporter) = params[Reporter]
-      val Stats(stats) = params[Stats]
-      val Label(label) = params[Label]
-      // For historical reasons, we have to respect the ServerRegistry
-      // for naming addresses (i.e. label=addr). Until we deprecate
-      // its usage, it takes precedence for identifying a server as
-      // it is the most recently set label.
-      val serverLabel = ServerRegistry.nameOf(addr) getOrElse label
-
-      // Connection bookkeeping used to explicitly manage
-      // connection resources per ListeningServer. Note, draining
-      // in-flight requests is expected to be managed by `newDispatcher`,
-      // so we can simply `close` all connections here.
-      val connections = Collections.newSetFromMap(
-        new ConcurrentHashMap[Closable, java.lang.Boolean])
-
-      // Hydrates a new ClientConnection with connection information from the
-      // given `transport`. ClientConnection instances are used to
-      // thread this through a finagle server stack.
-      def newConn(transport: Transport[In, Out]) = new ClientConnection {
-        val remoteAddress = transport.remoteAddress
-        val localAddress = transport.localAddress
-        def close(deadline: Time) = transport.close(deadline)
-        val onClose = transport.onClose.map(_ => ())
-      }
-
-      val statsReceiver =
-        if (serverLabel.isEmpty) stats
-        else stats.scope(serverLabel)
-
-      val serverParams = params +
-        Label(serverLabel) +
-        Stats(statsReceiver) +
-        Monitor(reporter(label, None) andThen monitor)
-
-      val serviceFactory = (stack ++ Stack.Leaf(Endpoint, factory))
-        .make(serverParams)
-
-      val server = copy1(params=serverParams)
-
-      // Listen over `addr` and serve traffic from incoming transports to
-      // `serviceFactory` via `newDispatcher`.
-      val listener = server.newListener()
-
-      // Export info about the listener type so that we can query info
-      // about its implementation at runtime. This assumes that the `toString`
-      // of the implementation is sufficiently descriptive.
-      val listenerImplKey = Seq(
-        ServerRegistry.registryName,
-        params[ProtocolLibrary].name,
-        params[Label].label,
-        "Listener")
-      GlobalRegistry.get.put(listenerImplKey, listener.toString)
-
-      val underlying = listener.listen(addr) { transport =>
-        serviceFactory(newConn(transport)).respond {
-          case Return(service) =>
-            val d = server.newDispatcher(transport, service)
-            connections.add(d)
-            transport.onClose ensure connections.remove(d)
-          case Throw(exc) =>
-            // If we fail to create a new session locally, we continue establishing
-            // the session but (1) reject any incoming requests; (2) close it right
-            // away. This allows protocols that support graceful shutdown to
-            // also gracefully deny new sessions.
-            val d = server.newDispatcher(
-              transport,
-              Service.const(Future.exception(
-                Failure.rejected("Terminating session and ignoring request", exc)))
-            )
-            connections.add(d)
-            transport.onClose ensure connections.remove(d)
-            // We give it a generous amount of time to shut down the session to
-            // improve our chances of being able to do so gracefully.
-            d.close(10.seconds)
-        }
-      }
-
-      ServerRegistry.register(underlying.boundAddress.toString, server.stack, server.params)
-
-      protected def closeServer(deadline: Time) = closeAwaitably {
-        // Here be dragons
-        // We want to do four things here in this order:
-        // 1. close the listening socket
-        // 2. close the factory (not sure if ordering matters for this step)
-        // 3. drain pending requests for existing connections
-        // 4. close those connections when their requests complete
-        // closing `underlying` eventually calls Netty3Listener.close which has an
-        // interesting side-effect of synchronously closing #1
-        val ulClosed = underlying.close(deadline)
-
-        // However we don't want to wait on the above because it will only complete
-        // when #4 is finished.  So we ignore it and close everything else.  Note that
-        // closing the connections here will do #2 and drain them via the Dispatcher.
-        val everythingElse = Seq[Closable](factory) ++ connections.asScala.toSeq
-
-        // and once they're drained we can then wait on the listener physically closing them
-        Closable.all(everythingElse:_*).close(deadline) before ulClosed
-      }
-
-      def boundAddress = underlying.boundAddress
-    }
+  override def configuredParams(params: Stack.Params): StackServer[Req, Rep]
 }

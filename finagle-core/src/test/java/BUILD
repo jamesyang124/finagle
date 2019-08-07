@@ -1,12 +1,12 @@
 junit_tests(
-  dependencies=[
-    '3rdparty/jvm/junit',
-    '3rdparty/jvm/io/netty',
-    'finagle/finagle-core',
-    'util/util-core',
-    '3rdparty/jvm/com/google/guava:guava',
-    'util/util-stats/src/main/scala:scala',
-  ],
-  sources=rglobs('*.java'),
-  fatal_warnings=True,
+    sources = rglobs("*.java"),
+    compiler_option_sets = {"fatal_warnings"},
+    dependencies = [
+        "3rdparty/jvm/junit",
+        "finagle/finagle-core",
+        "util/util-core",
+        "util/util-logging/src/main/scala",
+        "util/util-stats/src/main/scala",
+        "util/util-tunable/src/main/scala",
+    ],
 )

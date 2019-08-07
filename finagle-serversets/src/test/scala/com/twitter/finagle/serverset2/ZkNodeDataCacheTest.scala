@@ -1,6 +1,6 @@
 package com.twitter.finagle.serverset2
 
-import com.twitter.finagle.stats.{NullStatsReceiver, StatsReceiver}
+import com.twitter.finagle.stats.NullStatsReceiver
 import com.twitter.util.Future
 import org.junit.runner.RunWith
 import org.scalatest.junit.JUnitRunner
@@ -11,9 +11,8 @@ class ZkNodeDataCacheTest extends FunSuite {
 
   def nilZkSession = () => ZkSession.nil
 
-  class ZkTestCache(
-    clusterPath: String
-  ) extends ZkNodeDataCache[String](clusterPath, "Test", NullStatsReceiver) {
+  class ZkTestCache(clusterPath: String)
+      extends ZkNodeDataCache[String](clusterPath, "Test", NullStatsReceiver) {
     var parseNodeCalledCount = 0
     var shouldThrow = false
     override def loadEntity(path: String) = {
@@ -60,4 +59,3 @@ class ZkNodeDataCacheTest extends FunSuite {
     assert(cache.parseNodeCalledCount == 2)
   }
 }
-

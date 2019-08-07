@@ -1,20 +1,35 @@
 package com.twitter.finagle
 
-import com.twitter.finagle.client.{StackClient, StdStackClient, DefaultPool}
+import com.twitter.finagle.client.{DefaultPool, StackClient, StdStackClient, Transporter}
 import com.twitter.finagle.mysql._
-import com.twitter.finagle.mysql.transport.{Packet, TransportImpl}
-import com.twitter.finagle.param.{Monitor => _, ResponseClassifier => _, ExceptionStatsHandler => _, Tracer => _, _}
+import com.twitter.finagle.mysql.param._
+import com.twitter.finagle.mysql.transport.Packet
+import com.twitter.finagle.param.{
+  ExceptionStatsHandler => _,
+  Monitor => _,
+  ResponseClassifier => _,
+  Tracer => _,
+  _
+}
+import com.twitter.finagle.server.ServerInfo
 import com.twitter.finagle.service.{ResponseClassifier, RetryBudget}
-import com.twitter.finagle.stats.{NullStatsReceiver, ExceptionStatsHandler, StatsReceiver}
+import com.twitter.finagle.stats.{ExceptionStatsHandler, NullStatsReceiver, StatsReceiver}
+import com.twitter.finagle.toggle.Toggle
 import com.twitter.finagle.tracing._
-import com.twitter.finagle.transport.Transport
-import com.twitter.util.{Duration, Monitor}
+import com.twitter.finagle.transport.{Transport, TransportContext}
+import com.twitter.util.{Duration, Future, Monitor}
+import java.net.SocketAddress
 
 /**
  * Supplements a [[com.twitter.finagle.Client]] with convenient
  * builder methods for constructing a mysql client.
  */
 trait MysqlRichClient { self: com.twitter.finagle.Client[Request, Result] =>
+
+  /**
+   * Whether the client supports unsigned integer fields
+   */
+  protected val supportUnsigned: Boolean
 
   def richClientStatsReceiver: StatsReceiver = NullStatsReceiver
 
@@ -23,46 +38,56 @@ trait MysqlRichClient { self: com.twitter.finagle.Client[Request, Result] =>
    * destination described by `dest` with the assigned
    * `label`. The `label` is used to scope client stats.
    */
-  def newRichClient(dest: Name, label: String): mysql.Client with mysql.Transactions with mysql.Cursors =
-    mysql.Client(newClient(dest, label), richClientStatsReceiver)
+  def newRichClient(dest: Name, label: String): mysql.Client with mysql.Transactions =
+    mysql.Client(newClient(dest, label), richClientStatsReceiver, supportUnsigned)
 
   /**
    * Creates a new `RichClient` connected to the logical
    * destination described by `dest`.
+   *
+   * @param dest the location to connect to, e.g. "host:port". See the
+   *             [[https://twitter.github.io/finagle/guide/Names.html user guide]]
+   *             for details on destination names.
    */
-  def newRichClient(dest: String): mysql.Client with mysql.Transactions with mysql.Cursors =
-    mysql.Client(newClient(dest), richClientStatsReceiver)
+  def newRichClient(dest: String): mysql.Client with mysql.Transactions =
+    mysql.Client(newClient(dest), richClientStatsReceiver, supportUnsigned)
 }
 
 object MySqlClientTracingFilter {
-  object Stackable extends Stack.Module1[param.Label, ServiceFactory[Request, Result]] {
-    val role = ClientTracingFilter.role
-    val description = "Add MySql client specific annotations to the trace"
-    def make(_label: param.Label, next: ServiceFactory[Request, Result]) = {
-      val param.Label(label) = _label
+  object Stackable extends Stack.Module1[Label, ServiceFactory[Request, Result]] {
+    val role: Stack.Role = ClientTracingFilter.role
+    val description: String = "Add MySql client specific annotations to the trace"
+    def make(
+      _label: Label,
+      next: ServiceFactory[Request, Result]
+    ): ServiceFactory[Request, Result] = {
       // TODO(jeff): should be able to get this directly from ClientTracingFilter
       val annotations = new AnnotatingTracingFilter[Request, Result](
-        label, Annotation.ClientSend(), Annotation.ClientRecv())
-      annotations andThen TracingFilter andThen next
+        _label.label,
+        Annotation.ClientSend,
+        Annotation.ClientRecv
+      )
+      annotations.andThen(TracingFilter).andThen(next)
     }
   }
 
   object TracingFilter extends SimpleFilter[Request, Result] {
-    def apply(request: Request, service: Service[Request, Result]) = {
-      if (Trace.isActivelyTracing) {
+    def apply(request: Request, service: Service[Request, Result]): Future[Result] = {
+      val trace = Trace()
+      if (trace.isActivelyTracing) {
         request match {
-          case QueryRequest(sqlStatement) => Trace.recordBinary("mysql.query", sqlStatement)
-          case PrepareRequest(sqlStatement) => Trace.recordBinary("mysql.prepare", sqlStatement)
+          case QueryRequest(sqlStatement) => trace.recordBinary("mysql.query", sqlStatement)
+          case PrepareRequest(sqlStatement) => trace.recordBinary("mysql.prepare", sqlStatement)
           // TODO: save the prepared statement and put it in the executed request trace
-          case ExecuteRequest(id, _, _, _) => Trace.recordBinary("mysql.execute", id)
-          case _ => Trace.record("mysql." + request.getClass.getSimpleName.replace("$", ""))
+          case ExecuteRequest(id, _, _, _) => trace.recordBinary("mysql.execute", id)
+          case _ => trace.record("mysql." + request.getClass.getSimpleName.replace("$", ""))
         }
       }
+
       service(request)
     }
   }
 }
-
 
 /**
  * @example {{{
@@ -74,23 +99,33 @@ object MySqlClientTracingFilter {
  */
 object Mysql extends com.twitter.finagle.Client[Request, Result] with MysqlRichClient {
 
-  object param {
-    /**
-     * A class eligible for configuring the maximum number of prepare
-     * statements.  After creating `num` prepare statements, we'll start purging
-     * old ones.
-     */
-    case class MaxConcurrentPrepareStatements(num: Int) {
-      assert(num <= Int.MaxValue, s"$num is not <= Int.MaxValue bytes")
-      assert(num > 0, s"$num must be positive")
+  private[this] val includeHandshakeInServiceAcquisitionToggle: Toggle[Int] =
+    Toggles("com.twitter.finagle.mysql.IncludeHandshakeInServiceAcquisition")
 
-      def mk(): (MaxConcurrentPrepareStatements, Stack.Param[MaxConcurrentPrepareStatements]) =
-        (this, MaxConcurrentPrepareStatements.param)
-    }
+  // This param having a value other than `None` indicates that
+  // the client is setup to try to use SSL/TLS.
+  private[this] def wantsToUseSsl(params: Stack.Params): Boolean =
+    params[Transport.ClientSsl].sslClientConfiguration.isDefined
 
-    object MaxConcurrentPrepareStatements {
-      implicit val param = Stack.Param(MaxConcurrentPrepareStatements(20))
-    }
+  protected val supportUnsigned: Boolean = UnsignedColumns.param.default.supported
+
+  object Client {
+
+    private val params: Stack.Params = StackClient.defaultParams +
+      ProtocolLibrary("mysql") +
+      DefaultPool.Param(
+        low = 0,
+        high = 1,
+        bufferSize = 0,
+        idleTime = Duration.Top,
+        maxWaiters = Int.MaxValue
+      )
+
+    private val stack: Stack[ServiceFactory[Request, Result]] = StackClient.newStack
+      .replace(ClientTracingFilter.role, MySqlClientTracingFilter.Stackable)
+      // Note: there is a stack overflow in insertAfter using CanStackFrom, thus the module.
+      .insertAfter(DefaultPool.Role, PoisonConnection.module)
+      .prepend(RollbackFactory.module)
   }
 
   /**
@@ -99,21 +134,45 @@ object Mysql extends com.twitter.finagle.Client[Request, Result] with MysqlRichC
    * of features from finagle including connection pooling and load
    * balancing.
    *
-   * Additionally, this class provides methods for constructing a rich
-   * client which exposes a rich mysql api.
+   * Additionally, this class provides methods via [[MysqlRichClient]] for constructing
+   * a client which exposes an API that has use case specific methods, for example
+   * [[mysql.Client.read]], [[mysql.Client.modify]], and [[mysql.Client.prepare]].
+   * This is an easier experience for most users.
+   *
+   * @example
+   * {{{
+   * import com.twitter.finagle.Mysql
+   * import com.twitter.finagle.mysql.Client
+   * import com.twitter.util.Future
+   *
+   * val client: Client = Mysql.client
+   *   .withCredentials("username", "password")
+   *   .withDatabase("database")
+   *   .newRichClient("host:port")
+   * val names: Future[Seq[String]] =
+   *   client.select("SELECT name FROM employee") { row =>
+   *     row.stringOrNull("name")
+   *   }
+   * }}}
    */
   case class Client(
-      stack: Stack[ServiceFactory[Request, Result]] = StackClient.newStack
-        .replace(ClientTracingFilter.role, MySqlClientTracingFilter.Stackable),
-      params: Stack.Params = StackClient.defaultParams + DefaultPool.Param(
-          low = 0, high = 1, bufferSize = 0,
-          idleTime = Duration.Top,
-          maxWaiters = Int.MaxValue) +
-        ProtocolLibrary("mysql"))
-    extends StdStackClient[Request, Result, Client]
-    with WithSessionPool[Client]
-    with WithDefaultLoadBalancer[Client]
-    with MysqlRichClient {
+    stack: Stack[ServiceFactory[Request, Result]] = Client.stack,
+    params: Stack.Params = Client.params)
+      extends StdStackClient[Request, Result, Client]
+      with WithSessionPool[Client]
+      with WithDefaultLoadBalancer[Client]
+      with MysqlRichClient {
+
+    // If the param is set to use SSL/TLS, we force handshaking to
+    // be done as part of service acquisition. We want all handshaking
+    // to be done eventually as part of service acquisition, and SSL/TLS
+    // is functionality that didn't exist previously, so make SSL/TLS take
+    // the preferred path.
+    private[this] val includeHandshakeInServiceAcquisition: Boolean =
+      wantsToUseSsl(params) ||
+        includeHandshakeInServiceAcquisitionToggle(ServerInfo().id.hashCode)
+
+    protected val supportUnsigned: Boolean = params[UnsignedColumns].supported
 
     protected def copy1(
       stack: Stack[ServiceFactory[Request, Result]] = this.stack,
@@ -122,35 +181,93 @@ object Mysql extends com.twitter.finagle.Client[Request, Result] with MysqlRichC
 
     protected type In = Packet
     protected type Out = Packet
-    protected def newTransporter() = params[TransportImpl].transporter(params)
-    protected def newDispatcher(transport: Transport[Packet, Packet]):  Service[Request, Result] = {
-      val param.MaxConcurrentPrepareStatements(num) = params[param.MaxConcurrentPrepareStatements]
-      mysql.ClientDispatcher(transport, Handshake(params), num)
-    }
+    protected type Context = TransportContext
+
+    protected def newTransporter(addr: SocketAddress): Transporter[In, Out, Context] =
+      new MysqlTransporter(addr, params, includeHandshakeInServiceAcquisition)
+
+    protected def newDispatcher(
+      transport: Transport[In, Out] { type Context <: Client.this.Context }
+    ): Service[Request, Result] =
+      // If we're performing handshaking during the service acquisition phase
+      // (via the transporter, see the `newTransporter` method above), then we
+      // don't want to perform it again here. If we didn't there, then we do here.
+      // Eventually `newTransporter` should be the only place where it's done.
+      mysql.ClientDispatcher(transport, params, !includeHandshakeInServiceAcquisition)
 
     /**
      * The maximum number of concurrent prepare statements.
      */
     def withMaxConcurrentPrepareStatements(num: Int): Client =
-      configured(param.MaxConcurrentPrepareStatements(num))
+      configured(MaxConcurrentPrepareStatements(num))
 
     /**
      * The credentials to use when authenticating a new session.
+     *
+     * @param p if `null`, no password is used.
      */
     def withCredentials(u: String, p: String): Client =
-      configured(Handshake.Credentials(Option(u), Option(p)))
+      configured(Credentials(Option(u), Option(p)))
 
     /**
      * Database to use when this client establishes a new session.
      */
     def withDatabase(db: String): Client =
-      configured(Handshake.Database(Option(db)))
+      configured(Database(Option(db)))
 
     /**
      * The default character set used when establishing a new session.
      */
     def withCharset(charset: Short): Client =
-      configured(Handshake.Charset(charset))
+      configured(Charset(charset))
+
+    /**
+     * Don't set the CLIENT_FOUND_ROWS flag when establishing a new
+     * session. This will make "INSERT ... ON DUPLICATE KEY UPDATE"
+     * statements return the "correct" update count.
+     *
+     * See https://dev.mysql.com/doc/refman/5.7/en/information-functions.html#function_row-count
+     */
+    def withAffectedRows(): Client =
+      configured(FoundRows(false))
+
+    /**
+     * Installs a module on the client which issues a ROLLBACK statement when a service is put
+     * back into the pool. This exists to ensure that a "clean" connection is always returned
+     * from the connection pool. For example, it prevents situations where an unfinished
+     * transaction has been written to the wire, the service has been released back into
+     * the pool, the same service is again checked out of the pool, and a statement
+     * that causes an implicit commit is issued.
+     *
+     * The additional work incurred for the rollback may result in less throughput from the
+     * connection pool and, as such, may require configuring the pool (via `withSessionPool`)
+     * to offer more available connections connections.
+     *
+     * @see [[com.twitter.finagle.mysql.RollbackFactory]]
+     * @see https://dev.mysql.com/doc/en/implicit-commit.html
+     * @note this module is installed by default.
+     */
+    def withRollback: Client =
+      if (stack.contains(RollbackFactory.Role)) {
+        this
+      } else {
+        withStack(stack.prepend(RollbackFactory.module))
+      }
+
+    /**
+     * Removes the module on the client which issues a ROLLBACK statement each time a
+     * service is put back into the pool. This ''may'' result in better performance
+     * at the risk of receiving a connection from the pool with uncommitted state.
+     *
+     * Instead of disabling this feature, consider configuring the connection pool
+     * for the client (via `withSessionPool`) to offer more available connections.
+     *
+     * @see [[com.twitter.finagle.mysql.RollbackFactory]]
+     * @see https://dev.mysql.com/doc/en/implicit-commit.html
+     * @note the rollback module is installed by default.
+     */
+    def withNoRollback: Client =
+      withStack(stack.remove(RollbackFactory.Role))
 
     // Java-friendly forwarders
     // See https://issues.scala-lang.org/browse/SI-8905
@@ -179,8 +296,15 @@ object Mysql extends com.twitter.finagle.Client[Request, Result] with MysqlRichC
     override def withResponseClassifier(responseClassifier: ResponseClassifier): Client =
       super.withResponseClassifier(responseClassifier)
     override def withRetryBudget(budget: RetryBudget): Client = super.withRetryBudget(budget)
-    override def withRetryBackoff(backoff: Stream[Duration]): Client = super.withRetryBackoff(backoff)
+    override def withRetryBackoff(backoff: Stream[Duration]): Client =
+      super.withRetryBackoff(backoff)
 
+    override def withStack(stack: Stack[ServiceFactory[Request, Result]]): Client =
+      super.withStack(stack)
+    override def withStack(
+      fn: Stack[ServiceFactory[Request, Result]] => Stack[ServiceFactory[Request, Result]]
+    ): Client =
+      super.withStack(fn)
     override def configured[P](psp: (P, Stack.Param[P])): Client = super.configured(psp)
     override def filtered(filter: Filter[Request, Result, Request, Result]): Client =
       super.filtered(filter)
@@ -188,40 +312,11 @@ object Mysql extends com.twitter.finagle.Client[Request, Result] with MysqlRichC
     override def richClientStatsReceiver: StatsReceiver = params[Stats].statsReceiver
   }
 
-  val client = Client()
+  def client: Mysql.Client = Client()
 
   def newClient(dest: Name, label: String): ServiceFactory[Request, Result] =
     client.newClient(dest, label)
 
   def newService(dest: Name, label: String): Service[Request, Result] =
     client.newService(dest, label)
-
-  /**
-   * The credentials to use when authenticating a new session.
-   */
-  @deprecated("Use client.withCredentials", "6.22.0")
-  def withCredentials(u: String, p: String): Client =
-    client.configured(Handshake.Credentials(Option(u), Option(p)))
-
-  /**
-   * Database to use when this client establishes a new session.
-   */
-  @deprecated("Use client.withDatabase", "6.22.0")
-  def withDatabase(db: String): Client =
-    client.configured(Handshake.Database(Option(db)))
-
-  /**
-   * The default character set used when establishing
-   * a new session.
-   */
-  @deprecated("Use client.withCharset", "6.22.0")
-  def withCharset(charset: Short): Client =
-    client.configured(Handshake.Charset(charset))
-
-  /**
-   * A client configured with parameter p.
-   */
-  @deprecated("Use client.configured", "6.22.0")
-  def configured[P: Stack.Param](p: P): Client =
-    client.configured(p)
 }

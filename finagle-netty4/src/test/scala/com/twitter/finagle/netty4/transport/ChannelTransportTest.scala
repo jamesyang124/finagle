@@ -1,32 +1,29 @@
 package com.twitter.finagle.netty4.transport
 
-import com.twitter.conversions.time._
+import com.twitter.concurrent.AsyncQueue
+import com.twitter.conversions.DurationOps._
 import com.twitter.finagle._
-import com.twitter.util.{Throw, Return, Await, Future}
+import com.twitter.finagle.transport.Transport
+import com.twitter.util.{Await, Future, Return, Time, Throw}
 import io.netty.channel.{ChannelException => _, _}
 import io.netty.channel.embedded.EmbeddedChannel
-import io.netty.handler.ssl.SslHandler
-import org.junit.runner.RunWith
-import org.scalatest.{OneInstancePerTest, FunSuite}
+import org.scalatest.{FunSuite, OneInstancePerTest}
 import org.scalatest.concurrent.Eventually._
-import org.scalatest.junit.JUnitRunner
-import org.scalatest.mock.MockitoSugar
+import org.scalatest.mockito.MockitoSugar
 import org.scalatest.prop.GeneratorDrivenPropertyChecks
 import org.mockito.Mockito._
-import java.security.cert.Certificate
-import javax.net.ssl.{SSLSession, SSLEngine}
 
-@RunWith(classOf[JUnitRunner])
-class ChannelTransportTest extends FunSuite
-  with GeneratorDrivenPropertyChecks with OneInstancePerTest with MockitoSugar {
+class ChannelTransportTest
+    extends FunSuite
+    with GeneratorDrivenPropertyChecks
+    with OneInstancePerTest
+    with MockitoSugar {
 
   val timeout = 10.seconds
 
-  val (transport, channel) = {
-    val ch = new EmbeddedChannel()
-    val tr = new ChannelTransport[String, String](ch)
-    (tr, ch)
-  }
+  val channel = new EmbeddedChannel()
+  val channelTransport = new ChannelTransport(channel)
+  val transport = Transport.cast[String, String](channelTransport)
 
   def assertSeenWhatsWritten[A](written: Boolean, a: A, seen: Future[A]): Unit =
     assert(!written || (written && Await.result(seen, timeout) == a))
@@ -37,12 +34,28 @@ class ChannelTransportTest extends FunSuite
     assert(transport.status == Status.Closed)
   }
 
+  test("ChannelTransport status is open when not failed and channel is not closed") {
+    assert(channel.isOpen)
+    assert(transport.status == Status.Open)
+  }
+
+  test("ChannelTransport status is closed when failed") {
+    channelTransport.failed.compareAndSet(false, true)
+    assert(transport.status == Status.Closed)
+  }
+
+  test("ChannelTransport status is closed when channel is closed") {
+    channel.close()
+    assert(transport.status == Status.Closed)
+  }
+
   test("ChannelTransport still works if we channel.write before transport.read") {
     forAll { ss: Seq[String] =>
       val written = ss.map(s => channel.writeInbound(s))
-      written.zip(ss).foreach { case (w, s) =>
-        assertSeenWhatsWritten(w, s, transport.read())
-        assert(transport.status == Status.Open)
+      written.zip(ss).foreach {
+        case (w, s) =>
+          assertSeenWhatsWritten(w, s, transport.read())
+          assert(transport.status == Status.Open)
       }
     }
 
@@ -56,9 +69,10 @@ class ChannelTransportTest extends FunSuite
       val seen = ss.map(_ => transport.read())
       val written = ss.map(s => channel.writeInbound(s))
 
-      written.zip(ss).zip(seen).foreach { case ((w, s), f) =>
-        assertSeenWhatsWritten(w, s, f)
-        assert(transport.status == Status.Open)
+      written.zip(ss).zip(seen).foreach {
+        case ((w, s), f) =>
+          assertSeenWhatsWritten(w, s, f)
+          assert(transport.status == Status.Open)
       }
     }
 
@@ -86,39 +100,6 @@ class ChannelTransportTest extends FunSuite
   test("ChannelTransport writes successfully") {
     forAll { s: String =>
       assert(transport.write(s).map(_ => channel.readOutbound[String]).poll == Some(Return(s)))
-    }
-  }
-
-  test("ChannelTransport cancels the underlying write when interrupted by the caller") {
-    var p: Option[ChannelPromise] = None
-    channel.pipeline.addLast(new ChannelOutboundHandlerAdapter {
-      override def write(ctx: ChannelHandlerContext, msg: Any, promise: ChannelPromise): Unit = {
-        // we store pending promise to make sure it's canceled
-        p = Some(promise)
-      }
-    })
-
-    forAll { s: String =>
-      val written = transport.write(s)
-      assert(!written.isDefined)
-
-      written.raise(new Exception)
-      assert(p.forall(_.isCancelled))
-    }
-  }
-
-  test("ChannelTransport write propagates a failure back when it's cancelled in the netty layer") {
-    channel.pipeline.addLast(new ChannelOutboundHandlerAdapter {
-      override def write(ctx: ChannelHandlerContext, msg: Any, promise: ChannelPromise): Unit = {
-        // we cancel every single write
-        promise.cancel(false /*mayInterruptIfRunning*/)
-      }
-    })
-
-    forAll { s: String =>
-      val thrown = intercept[Exception](Await.result(transport.write(s), timeout))
-      // we do this because forAll doesn't seem to work with just intercepts
-      assert(thrown.isInstanceOf[CancelledWriteException])
     }
   }
 
@@ -170,23 +151,11 @@ class ChannelTransportTest extends FunSuite
     assert(transport.status == Status.Closed)
   }
 
-  test("peerCertificate") {
-    val engine = mock[SSLEngine]
-    val session = mock[SSLSession]
-    val cert = mock[Certificate]
-    when(engine.getSession).thenReturn(session)
-    when(session.getPeerCertificates).thenReturn(Array(cert))
-    val ch = new EmbeddedChannel(new SslHandler(engine))
-    val tr = new ChannelTransport[String, String](ch)
-
-    assert(tr.peerCertificate == Some(cert))
-  }
-
   test("ChannelTransport drains the offer queue before reading from the channel") {
     val channel = spy(new EmbeddedChannel())
     channel.config().setAutoRead(false)
 
-    val trans = new ChannelTransport[String, String](channel)
+    val trans = Transport.cast[String, String](new ChannelTransport(channel))
 
     // buffer data in the underlying channel
     channel.writeInbound("one")
@@ -203,7 +172,6 @@ class ChannelTransportTest extends FunSuite
     // an empty queue leads to a single read
     verify(channel, times(1)).read()
 
-
     // the offer q is drained, so reading another message triggers another channel read
     trans.read()
     eventually { verify(channel, times(2)).read() }
@@ -215,7 +183,7 @@ class ChannelTransportTest extends FunSuite
     val channel = spy(new EmbeddedChannel())
     channel.config().setAutoRead(false)
 
-    val trans = new ChannelTransport[String, String](channel)
+    val trans = Transport.cast[String, String](new ChannelTransport(channel))
 
     // On startup, the ChannelTransport should queue one read
     channel.pipeline().fireChannelActive()
@@ -235,7 +203,7 @@ class ChannelTransportTest extends FunSuite
     val channel = spy(new EmbeddedChannel())
     channel.config().setAutoRead(false)
 
-    val trans = new ChannelTransport[String, String](channel)
+    val trans = Transport.cast[String, String](new ChannelTransport(channel))
 
     verify(channel, never).read()
     // buffer data in the underlying channel
@@ -259,5 +227,75 @@ class ChannelTransportTest extends FunSuite
     // Called twice to buffer one inbound message to attempt to detect close events
     verify(channel, times(6)).read()
     assert("three" == Await.result(readThree, timeout))
+  }
+
+  test("buffered messages are not flushed on transport shutdown") {
+    val em = new EmbeddedChannel
+    val ct = Transport.cast[String, String](new ChannelTransport(em))
+    em.writeInbound("one")
+    Await.ready(ct.close())
+    assert(Await.result(ct.read(), 1.second) == "one")
+  }
+
+  test("buffered messages are not flushed on exceptions") {
+    val em = new EmbeddedChannel
+    val ct = Transport.cast[String, String](new ChannelTransport(em))
+    // buffer a message
+    em.writeInbound("one")
+
+    // channel failure -> transport is failed
+    em.pipeline().fireExceptionCaught(new Exception("boom"))
+    assert(ct.status == Status.Closed)
+
+    assert(Await.result(ct.read(), 1.second) == "one")
+  }
+
+  test("pending transport reads are failed on channel close") {
+    val em = new EmbeddedChannel
+    val ct = Transport.cast[String, String](new ChannelTransport(em))
+    val read = ct.read()
+    Await.ready(ct.close(), 1.second)
+    intercept[ChannelClosedException] { Await.result(read, 1.second) }
+  }
+
+  test("disabling autoread midstream is safe") {
+    val em = new EmbeddedChannel
+    em.config.setAutoRead(true)
+    val ct = new ChannelTransport(em)
+    val transport = Transport.cast[String, String](ct)
+    val f = ct.read()
+    em.config.setAutoRead(false)
+
+    em.writeInbound("one")
+
+    assert(ct.ReadManager.getMsgsNeeded == 0)
+  }
+
+  test("offer failures fail the transport") {
+    val em = new EmbeddedChannel
+    val ct = new ChannelTransport(em, new AsyncQueue[Any](maxPendingOffers = 1))
+    val transport = Transport.cast[String, String](ct)
+
+    // full read queue
+    em.writeInbound("full")
+
+    // rejected
+    em.writeInbound("doomed")
+
+    assert(ct.status == Status.Closed)
+  }
+
+  test("calling close multiple times only closes the channel once") {
+    val ch = new EmbeddedChannel()
+    val transport = new ChannelTransport(ch)
+    assert(!transport.closed.isDefined)
+    transport.close(Time.now)
+    assert(!ch.isOpen)
+    assert(transport.closed.isDefined)
+    transport.close(Time.now)
+    transport.close(Time.now)
+    assert(transport.closed.isDefined)
+    // Nothing bad happened
+    succeed
   }
 }

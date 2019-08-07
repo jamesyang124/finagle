@@ -28,7 +28,7 @@ private[redis] trait ListCommands { self: BaseClient =>
   def lIndex(key: Buf, index: JLong): Future[Option[Buf]] =
     doRequest(LIndex(key, index)) {
       case BulkReply(message) => Future.value(Some(message))
-      case EmptyBulkReply     => Future.None
+      case EmptyBulkReply => Future.None
     }
 
   /**
@@ -39,11 +39,7 @@ private[redis] trait ListCommands { self: BaseClient =>
    * @return `Some` of the new length of the list. `None` if the pivot is not
    *        found, or the list is empty.
    */
-  def lInsertAfter(
-    key: Buf,
-    pivot: Buf,
-    value: Buf
-  ): Future[Option[JLong]] =
+  def lInsertAfter(key: Buf, pivot: Buf, value: Buf): Future[Option[JLong]] =
     doRequest(LInsert(key, "AFTER", pivot, value)) {
       case IntegerReply(n) => Future.value(if (n == -1) None else Some(n))
     }
@@ -55,11 +51,7 @@ private[redis] trait ListCommands { self: BaseClient =>
    * @return `Some` of the new length of the list, or `None` if the pivot is
    *        not found, or the list is empty.
    */
-  def lInsertBefore(
-    key: Buf,
-    pivot: Buf,
-    value: Buf
-  ): Future[Option[JLong]] =
+  def lInsertBefore(key: Buf, pivot: Buf, value: Buf): Future[Option[JLong]] =
     doRequest(LInsert(key, "BEFORE", pivot, value)) {
       case IntegerReply(n) => Future.value(if (n == -1) None else Some(n))
     }
@@ -74,7 +66,7 @@ private[redis] trait ListCommands { self: BaseClient =>
   def lPop(key: Buf): Future[Option[Buf]] =
     doRequest(LPop(key)) {
       case BulkReply(message) => Future.value(Some(message))
-      case EmptyBulkReply     => Future.None
+      case EmptyBulkReply => Future.None
     }
 
   /**
@@ -121,7 +113,7 @@ private[redis] trait ListCommands { self: BaseClient =>
   def lRange(key: Buf, start: JLong, end: JLong): Future[List[Buf]] =
     doRequest(LRange(key, start, end)) {
       case MBulkReply(message) => Future.value(ReplyFormat.toBuf(message))
-      case EmptyMBulkReply    => Future.value(List.empty)
+      case EmptyMBulkReply => Future.value(List.empty)
     }
 
   /**
@@ -134,7 +126,7 @@ private[redis] trait ListCommands { self: BaseClient =>
   def rPop(key: Buf): Future[Option[Buf]] =
     doRequest(RPop(key)) {
       case BulkReply(message) => Future.value(Some(message))
-      case EmptyBulkReply     => Future.None
+      case EmptyBulkReply => Future.None
     }
 
   /**
@@ -155,5 +147,18 @@ private[redis] trait ListCommands { self: BaseClient =>
   def lTrim(key: Buf, start: JLong, end: JLong): Future[Unit] =
     doRequest(LTrim(key, start, end)) {
       case StatusReply(message) => Future.Unit
+    }
+
+  /**
+   * Atomically returns and removes the last element (tail) of the list stored at source,
+   * and pushes the element at the first element (head) of the list stored at destination
+   *
+   * @return `Some` of the value of the popped element, or `None` if the list is
+   *         empty.
+   */
+  def rPopLPush(source: Buf, dest: Buf): Future[Option[Buf]] =
+    doRequest(RPopLPush(source, dest)) {
+      case BulkReply(message) => Future.value(Some(message))
+      case EmptyBulkReply => Future.None
     }
 }

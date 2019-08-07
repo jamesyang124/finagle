@@ -1,7 +1,7 @@
 package com.twitter.finagle.addr
 
 import com.twitter.concurrent.Broker
-import com.twitter.conversions.time._
+import com.twitter.conversions.DurationOps._
 import com.twitter.finagle.{Addr, Address}
 import com.twitter.finagle.stats.InMemoryStatsReceiver
 import com.twitter.util.{MockTimer, Time}
@@ -12,8 +12,8 @@ import StabilizingAddr.State._
 
 class MockHealth {
   val pulse = new Broker[Health]()
-  def mkHealthy() { pulse ! Healthy }
-  def mkUnhealthy() { pulse ! Unhealthy }
+  def mkHealthy(): Unit = { pulse ! Healthy }
+  def mkUnhealthy(): Unit = { pulse ! Unhealthy }
 }
 
 class Context {
@@ -35,7 +35,7 @@ class Context {
     @volatile var set = Set.empty[Address]
 
     def apply() = set
-    def update(newSet: Set[Address]) {
+    def update(newSet: Set[Address]): Unit = {
       set = newSet
       broker !! Addr.Bound(set)
     }
@@ -53,7 +53,8 @@ class Context {
     healthStatus.pulse.recv,
     grace,
     statsRecv.scope("testGroup"),
-    timer)
+    timer
+  )
 
   @volatile var stabilized: Addr = Addr.Pending
   for (addr <- stabilizedAddr)
@@ -61,7 +62,7 @@ class Context {
 
   addrs() = allAddrs
 
-  def assertStable() {
+  def assertStable(): Unit = {
     assert(stabilized == Addr.Bound(addrs()))
   }
 }

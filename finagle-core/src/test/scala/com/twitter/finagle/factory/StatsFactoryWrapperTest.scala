@@ -8,7 +8,7 @@ import org.mockito.Matchers.any
 import org.mockito.Mockito.{verify, when}
 import org.scalatest.FunSuite
 import org.scalatest.junit.JUnitRunner
-import org.scalatest.mock.MockitoSugar
+import org.scalatest.mockito.MockitoSugar
 
 @RunWith(classOf[JUnitRunner])
 class StatsFactoryWrapperTest extends FunSuite with MockitoSugar {
@@ -26,8 +26,7 @@ class StatsFactoryWrapperTest extends FunSuite with MockitoSugar {
       Await.result(statsFac(ClientConnection.nil))
     }
 
-    val expected = Map(
-      List("failures", t.getClass.getName, rex.getClass.getName) -> 1)
+    val expected = Map(List("failures", t.getClass.getName, rex.getClass.getName) -> 1)
     assert(receiver.counters == expected)
     verify(underlying)(ClientConnection.nil)
   }

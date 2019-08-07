@@ -1,6 +1,6 @@
 package com.twitter.finagle.netty4.channel
 
-import io.netty.buffer.ByteBuf
+import io.netty.buffer.{ByteBuf, ByteBufUtil}
 import io.netty.buffer.Unpooled.wrappedBuffer
 import io.netty.channel._
 import java.net.InetSocketAddress
@@ -8,7 +8,7 @@ import org.junit.runner.RunWith
 import org.mockito.Mockito.when
 import org.scalatest.FunSuite
 import org.scalatest.junit.JUnitRunner
-import org.scalatest.mock.MockitoSugar
+import org.scalatest.mockito.MockitoSugar
 
 @RunWith(classOf[JUnitRunner])
 class ChannelSnooperTest extends FunSuite with MockitoSugar {
@@ -22,7 +22,9 @@ class ChannelSnooperTest extends FunSuite with MockitoSugar {
       override def dump(printer: (Channel, String) => Unit, ch: Channel, buf: ByteBuf): Unit = {
         messageCount += 1
         assert(buf == msgBuffer)
-        super.dump( { (_: Channel, m: String) => assert(msg == m) }, ch, buf )
+        super.dump({ (_: Channel, m: String) =>
+          assert(ByteBufUtil.hexDump(msgBuffer) == m)
+        }, ch, buf)
       }
     }
 
@@ -51,7 +53,6 @@ class ChannelSnooperTest extends FunSuite with MockitoSugar {
 
       override def printOutbound(ch: Channel, message: String): Unit =
         outboundCount += 1
-
 
       override def printer(message: String, exc: Throwable): Unit =
         exnCount += 1
@@ -200,7 +201,7 @@ class ChannelSnooperTest extends FunSuite with MockitoSugar {
     }
   }
 
-  test("SimpleChannelSnooper snoops channelRead"){
+  test("SimpleChannelSnooper snoops channelRead") {
     new InstrumentedSnooperCtx {
       assert(inboundCount == 0)
       scs.channelRead(ctx, msg)

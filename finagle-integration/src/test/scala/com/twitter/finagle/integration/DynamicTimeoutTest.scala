@@ -1,31 +1,26 @@
 package com.twitter.finagle.integration
 
-import com.twitter.conversions.time._
+import com.twitter.conversions.DurationOps._
 import com.twitter.finagle.client.{DynamicTimeout, StackClient}
-import com.twitter.finagle.http2.Http2
+import com.twitter.finagle.Http.Http2
 import com.twitter.finagle.memcached.protocol.{NoOp, Quit}
 import com.twitter.finagle.mux
 import com.twitter.finagle.server.StackServer
 import com.twitter.finagle.service.TimeoutFilter
-import com.twitter.finagle.util.HashedWheelTimer
+import com.twitter.finagle.util.DefaultTimer
 import com.twitter.finagle.{Http, IndividualRequestTimeoutException, Memcached, Mux, Service, http}
-import com.twitter.util.{Await, Future}
+import com.twitter.util.{Await, Future, Timer}
 import java.net.InetSocketAddress
-import org.junit.runner.RunWith
 import org.scalatest.FunSuite
-import org.scalatest.junit.JUnitRunner
 
-@RunWith(classOf[JUnitRunner])
 class DynamicTimeoutTest extends FunSuite {
 
   private def await[T](f: Future[T]): T = Await.result(f, 5.seconds)
 
-  private implicit val timer = HashedWheelTimer.Default
+  private implicit val timer: Timer = DefaultTimer
   private val serviceSleep = 50.milliseconds
 
-  private[this] def mkService[Req, Rep](
-    rep: Rep
-  ): Service[Req, Rep] = {
+  private[this] def mkService[Req, Rep](rep: Rep): Service[Req, Rep] = {
     new Service[Req, Rep] {
       def apply(req: Req): Future[Rep] =
         Future.sleep(serviceSleep).before { Future.value(rep) }
@@ -44,9 +39,8 @@ class DynamicTimeoutTest extends FunSuite {
     val clientWithTimeout = stackClient
       .configured(TimeoutFilter.Param(10.millis))
 
-    val modifiedStack = clientWithTimeout.stack.replace(
-      TimeoutFilter.role,
-      DynamicTimeout.perRequestModule[Req, Rep])
+    val modifiedStack =
+      clientWithTimeout.stack.replace(TimeoutFilter.role, DynamicTimeout.perRequestModule[Req, Rep])
 
     val server = stackServer.serve("localhost:*", mkService(rep))
     val addr = server.boundAddress.asInstanceOf[InetSocketAddress]
@@ -76,11 +70,10 @@ class DynamicTimeoutTest extends FunSuite {
     http.Response()
   )
 
-  if (!sys.props.contains("SKIP_FLAKY"))
   testDynamicTimeouts(
     "HTTP/2",
-    Http.server.configured(Http2),
-    Http.client.configured(Http2),
+    Http.server.configuredParams(Http2),
+    Http.client.configuredParams(Http2),
     http.Request(),
     http.Response()
   )
@@ -90,7 +83,7 @@ class DynamicTimeoutTest extends FunSuite {
     Memcached.server,
     Memcached.client,
     Quit(),
-    NoOp()
+    NoOp
   )
 
   testDynamicTimeouts(

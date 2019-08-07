@@ -1,8 +1,8 @@
 {
   "toggles": [
     {
-      "id": "com.twitter.finagle.memcached.UseNetty4",
-      "description": "Use Netty4 for the Finagle Memcached stack client",
+      "id": "com.twitter.finagle.memcached.UsePartitioningMemcachedClient",
+      "description": "Enables the new partitioning client for Memcached",
       "fraction": 0.0
     }
   ]

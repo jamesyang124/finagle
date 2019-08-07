@@ -1,10 +1,7 @@
 package com.twitter.finagle
 
-import org.junit.runner.RunWith
 import org.scalatest.FunSuite
-import org.scalatest.junit.JUnitRunner
 
-@RunWith(classOf[JUnitRunner])
 class StackTest extends FunSuite {
   val testRole1 = Stack.Role("TestRole1")
   val testRole2 = Stack.Role("TestRole2")
@@ -30,18 +27,16 @@ class StackTest extends FunSuite {
     assert(newStack().make(empty) == Seq(20, 10, 1, 2, 3, 4))
   }
 
-  test("Stack.transform") {
-    val stack = newStack() transform {
-      case Stack.Node(head, mk, next) =>
-        if (head.role == testRole3) Stack.Node(testHead4, (l: List[Int]) => 30::l, next)
-        else if (head.role == testRole2) next
-        else Stack.Node(head, mk, next)
-      case other => other
+  test("Stack.map") {
+    val stack = newStack().map { (head, l) =>
+      if (head.role == testRole3) 30 :: l
+      else if (head.role == testRole2) 0 :: l
+      else l
     }
 
-    assert(stack.make(empty) == Seq(30, 1, 2, 3, 4))
+    assert(stack.make(empty) == Seq(30, 20, 0, 10, 1, 2, 3, 4))
   }
-
+  
   test("Stack.insertBefore") {
     val stack = newStack()
     val module = new Stack.Module0[List[Int]] {
@@ -78,6 +73,10 @@ class StackTest extends FunSuite {
     assert(
       stack.insertAfter(testRole2, module).make(empty) ==
         Seq(20, 10, 100, 1, 2, 3, 4))
+
+    assert(
+      stack.insertAfter(testRole2, (l: List[Int]) => 5 :: l).make(empty) ==
+        Seq(20, 10, 5, 1, 2, 3, 4))
 
     assert(
       (stack ++ stack).insertAfter(testRole2, module).make(empty) ==
@@ -136,6 +135,25 @@ class StackTest extends FunSuite {
     }
 
     val stk2 = m2 +: stk1
+    assert(stk2.make(empty) == Seq(40, 30, 20, 10, 1, 2, 3, 4))
+  }
+
+  test("Stack.prepend with CanStackFrom") {
+    val stk0 = newStack()
+    assert(stk0.make(empty) == Seq(20, 10, 1, 2, 3, 4))
+
+    val fn1: List[Int] => List[Int] = { ints =>
+      30 :: ints
+    }
+
+    val stk1 = stk0.prepend(testRole1, fn1)
+    assert(stk1.make(empty) == Seq(30, 20, 10, 1, 2, 3, 4))
+
+    val fn2: List[Int] => List[Int] = { ints =>
+      40 :: ints
+    }
+
+    val stk2 = stk1.prepend(testRole1, fn2)
     assert(stk2.make(empty) == Seq(40, 30, 20, 10, 1, 2, 3, 4))
   }
 

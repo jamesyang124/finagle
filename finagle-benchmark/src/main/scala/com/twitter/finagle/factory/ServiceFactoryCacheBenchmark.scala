@@ -3,7 +3,7 @@ package com.twitter.finagle.factory
 import com.twitter.finagle.{ClientConnection, Service, ServiceFactory}
 import com.twitter.finagle.benchmark.StdBenchAnnotations
 import com.twitter.finagle.stats.NullStatsReceiver
-import com.twitter.util.Future
+import com.twitter.util.{Future, Timer}
 import java.util.Random
 import java.util.concurrent.atomic.AtomicInteger
 import org.openjdk.jmh.annotations.{Benchmark, Scope, State}
@@ -22,7 +22,9 @@ class ServiceFactoryCacheBenchmark extends StdBenchAnnotations {
 object ServiceFactoryCacheBenchmark {
 
   private[this] val newFactory: Int => ServiceFactory[Int, Int] = key => {
-    val svc = Service.mk[Int, Int] { in => Future.value(key + in) }
+    val svc = Service.mk[Int, Int] { in =>
+      Future.value(key + in)
+    }
     ServiceFactory.const(svc)
   }
 
@@ -34,10 +36,8 @@ object ServiceFactoryCacheBenchmark {
   class CacheState {
     val conn: ClientConnection = ClientConnection.nil
 
-    val cache = new ServiceFactoryCache[Int, Int, Int](
-      newFactory,
-      NullStatsReceiver,
-      MaxCacheSize)
+    val cache =
+      new ServiceFactoryCache[Int, Int, Int](newFactory, Timer.Nil, NullStatsReceiver, MaxCacheSize)
 
     def nextKey(): Int = {
       val offset = pos.incrementAndGet()

@@ -1,8 +1,8 @@
 package com.twitter.finagle.mux.lease.exp
 
 import com.twitter.app.GlobalFlag
-import com.twitter.conversions.storage.intToStorageUnitableWholeNumber
-import com.twitter.conversions.time._
+import com.twitter.conversions.StorageUnitOps._
+import com.twitter.conversions.DurationOps._
 import com.twitter.finagle.stats.{StatsReceiver, NullStatsReceiver, DefaultStatsReceiver}
 import com.twitter.util.{Duration, Stopwatch, StorageUnit, NilStopwatch}
 import java.util.Collections
@@ -38,11 +38,12 @@ private[finagle] class ClockedDrainer(
   log: Logger,
   lr: LogsReceiver = NullLogsReceiver,
   statsReceiver: StatsReceiver = NullStatsReceiver,
-  verbose: Boolean = false
-) extends Thread("GcDrainer") with Lessor {
+  verbose: Boolean = false)
+    extends Thread("GcDrainer")
+    with Lessor {
 
-  private[this] val lessees = Collections.newSetFromMap(
-    new ConcurrentHashMap[Lessee, java.lang.Boolean])
+  private[this] val lessees =
+    Collections.newSetFromMap(new ConcurrentHashMap[Lessee, java.lang.Boolean])
 
   private[this] val requestCount = new AtomicInteger(0)
   private[this] val narrival = new AtomicInteger(0)
@@ -93,12 +94,11 @@ private[finagle] class ClockedDrainer(
   def npending() = {
     var s = 0
     val iter = lessees.iterator()
-    while (iter.hasNext)
-      s += iter.next().npending()
+    while (iter.hasNext) s += iter.next().npending()
     s
   }
 
-  private[this] def upkeep(state: String, init: () => Duration) {
+  private[this] def upkeep(state: String, init: () => Duration): Unit = {
     lr.record("%s_ms".format(state), init().inMilliseconds.toString)
     lr.record("count_%s".format(state), requestCount.get().toString)
     lr.record("pending_%s".format(state), npending().toString)
@@ -106,7 +106,7 @@ private[finagle] class ClockedDrainer(
     coord.counter.info.record(lr, state)
   }
 
-  override def run() {
+  override def run(): Unit = {
     var ncycles = 0L
 
     val init = Stopwatch.start()
@@ -135,35 +135,37 @@ private[finagle] class ClockedDrainer(
   start()
 
   // READY
-  private[lease] def ready(init: () => Duration) { // private[lease] for testing
+  private[lease] def ready(init: () => Duration): Unit = { // private[lease] for testing
     lr.record("gate_open_ms", init().inMilliseconds.toString)
     coord.gateCycle()
 
     upkeep("open", init)
 
-    coord.sleepUntilDiscountRemaining(space, { () =>
-      if (verbose) {
-        log.info("AWAIT-DISCOUNT: discount="+space.discount()+
-          "; clock="+coord.counter +
-          "; space="+space
+    coord.sleepUntilDiscountRemaining(
+      space, { () =>
+        if (verbose) {
+          log.info(
+            "AWAIT-DISCOUNT: discount=" + space.discount() +
+              "; clock=" + coord.counter +
+              "; space=" + space
+          )
+        }
 
-        )
+        // discount (bytes) / rate (bytes / second) == expiry (seconds)
+        issueAll((space.discount.inBytes / coord.counter.rate).toLong.seconds)
       }
-
-      // discount (bytes) / rate (bytes / second) == expiry (seconds)
-      issueAll((space.discount.inBytes / coord.counter.rate).toLong.seconds)
-    })
+    )
   }
 
   // DRAINING
-  private[lease] def drain() { // private[lease] for testing
+  private[lease] def drain(): Unit = { // private[lease] for testing
     val sinceClosed = Stopwatch.start()
     startDraining()
     finishDraining()
     stats.drainTime.add(sinceClosed().inMilliseconds)
   }
 
-  private[this] def startDraining() {
+  private[this] def startDraining(): Unit = {
     stats.openTime.add(openFor().inMilliseconds)
     openFor = NilStopwatch.start()
     closedFor = Stopwatch.start()
@@ -173,21 +175,22 @@ private[finagle] class ClockedDrainer(
     issueAll(Duration.Zero)
   }
 
-  private[this] def issueAll(duration: Duration) {
+  private[this] def issueAll(duration: Duration): Unit = {
     val iter = lessees.iterator()
-    while (iter.hasNext)
-      iter.next().issue(duration)
+    while (iter.hasNext) iter.next().issue(duration)
   }
 
-  private[this] def finishDraining() {
+  private[this] def finishDraining(): Unit = {
     val maxWait = calculateMaxWait
 
     if (verbose) {
-      log.info("AWAIT-DRAIN: n="+npending()+
-        "; clock="+coord.counter+
-        "; space="+space+
-        "; maxWaitMs="+maxWait.inMilliseconds+
-        "; minDiscount="+space.minDiscount)
+      log.info(
+        "AWAIT-DRAIN: n=" + npending() +
+          "; clock=" + coord.counter +
+          "; space=" + space +
+          "; maxWaitMs=" + maxWait.inMilliseconds +
+          "; minDiscount=" + space.minDiscount
+      )
     }
 
     coord.sleepUntilFinishedDraining(space, maxWait, npending, log)
@@ -195,13 +198,16 @@ private[finagle] class ClockedDrainer(
 
   // GC
   // loop until the gc is acknowledged
-  private[lease] def gc(generation: Long, init: () => Duration) { // private[lease] for testing
+  private[lease] def gc(
+    generation: Long,
+    init: () => Duration
+  ): Unit = { // private[lease] for testing
     val elapsedGc = Stopwatch.start()
 
     forcedGc = 0
     if (coord.counter.info.generation() == generation) {
       val n = npending()
-      if (verbose) log.info("FORCE-GC: n="+n+"; clock="+coord.counter+"; space="+space)
+      if (verbose) log.info("FORCE-GC: n=" + n + "; clock=" + coord.counter + "; space=" + space)
 
       lr.record("byteLeft", coord.counter.info.remaining().inBytes.toString)
 
@@ -226,7 +232,7 @@ private[finagle] class ClockedDrainer(
   }
 
   // UNDRAINING
-  private[lease] def undrain() { // private[lease] for testing
+  private[lease] def undrain(): Unit = { // private[lease] for testing
     stats.closedTime.add(closedFor().inMilliseconds)
     openFor = Stopwatch.start()
     closedFor = NilStopwatch.start()
@@ -236,7 +242,7 @@ private[finagle] class ClockedDrainer(
   }
 
   // FLUSHING
-  private[this] def flushLogs() {
+  private[this] def flushLogs(): Unit = {
     lr.record("gendiff", (genDrained - genOpen).toString)
     lr.record("forcedGc", forcedGc.toString)
 
@@ -244,30 +250,28 @@ private[finagle] class ClockedDrainer(
   }
 
   // TODO: can this API be made easier to use?
-  def register(lessee: Lessee) {
+  def register(lessee: Lessee): Unit = {
     lessees.add(lessee)
     // TODO: issue leases immediately.
     // currently there's a bit of startup cost if
     // a client joins while we're draining.
   }
 
-  def unregister(lessee: Lessee) {
+  def unregister(lessee: Lessee): Unit = {
     lessees.remove(lessee)
   }
 
-  def observe(d: Duration) {
+  def observe(d: Duration): Unit = {
     requestCount.incrementAndGet()
     rSnooper.observe(d)
   }
 
-  def observeArrival() {
+  def observeArrival(): Unit = {
     narrival.incrementAndGet()
   }
 }
 
-
-object drainerDiscountRange extends GlobalFlag(
-  (50.megabytes, 600.megabytes), "Range of discount")
+object drainerDiscountRange extends GlobalFlag((50.megabytes, 600.megabytes), "Range of discount")
 
 object drainerPercentile extends GlobalFlag(95, "GC drainer cutoff percentile")
 
@@ -283,13 +287,15 @@ private[finagle] object ClockedDrainer {
   lazy val flagged: Lessor = if (drainerEnabled()) {
     Coordinator.create() match {
       case None =>
-        log.warning("Failed to acquire a ParNew+CMS Coordinator; cannot "+
-          "construct drainer")
+        log.warning(
+          "Failed to acquire a ParNew+CMS Coordinator; cannot " +
+            "construct drainer"
+        )
         Lessor.nil
       case Some(coord) =>
         val rSnooper = new RequestSnooper(
           coord.counter,
-          drainerPercentile().toDouble / 100.0,
+          drainerPercentile(),
           lr
         )
 

@@ -1,6 +1,5 @@
 package com.twitter.finagle.server
 
-import com.twitter.finagle.toggle.WriteOnce
 import com.twitter.util.NetUtil
 import com.twitter.util.registry.GlobalRegistry
 
@@ -15,7 +14,7 @@ abstract class ServerInfo {
    * Commonly used values include: "production", "test", "development",
    * and "staging".
    *
-   * @see [[com.twitter.finagle.toggle.StandardToggleMap]]
+   * @see `com.twitter.finagle.toggle.StandardToggleMap`
    */
   def environment: Option[String]
 
@@ -26,6 +25,17 @@ abstract class ServerInfo {
    */
   def id: String
 
+  /**
+   * An identifier which represents the "cluster" that this server
+   * belongs to. Note, in some cases where the server isn't part of
+   * a cluster, this can be equivalent to `id`.
+   */
+  def clusterId: String
+
+  /**
+   * The instance id of the server, if available
+   */
+  def instanceId: Option[Long]
 }
 
 object ServerInfo {
@@ -37,6 +47,8 @@ object ServerInfo {
     override def toString: String = "ServerInfo.Empty"
     def environment: Option[String] = None
     val id: String = NetUtil.getLocalHostName()
+    val instanceId: Option[Long] = None
+    val clusterId: String = id
   }
 
   private[this] def registerServerInfo(serverInfo: ServerInfo): Unit =
@@ -46,7 +58,7 @@ object ServerInfo {
   registerServerInfo(global())
 
   /**
-   * Initialize the global [[ServerInfo]] returned by [[ServerInfo$.apply]].
+   * Initialize the global [[ServerInfo]] returned by [[ServerInfo.apply]].
    *
    * May only be called once.
    */

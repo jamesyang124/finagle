@@ -1,13 +1,12 @@
 java_library(
-  provides = artifact(
-    org = 'com.twitter',
-    name = 'finagle-mux-java',
-    repo = artifactory,
-  ),
-  fatal_warnings=True,
-  sources=rglobs('*.java'),
-  dependencies=[
-    '3rdparty/jvm/org/scala-lang:scala-library',
-    'finagle/finagle-mux/src/main/scala'
-  ]
+    sources = rglobs("*.java"),
+    compiler_option_sets = {"fatal_warnings"},
+    provides = artifact(
+        org = "com.twitter",
+        name = "finagle-mux-java",
+        repo = artifactory,
+    ),
+    dependencies = [
+        "finagle/finagle-mux/src/main/scala",
+    ],
 )

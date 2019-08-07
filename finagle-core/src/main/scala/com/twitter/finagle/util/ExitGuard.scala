@@ -1,6 +1,5 @@
 package com.twitter.finagle.util
 
-
 /**
  * ExitGuard prevents the process from exiting normally by use of a
  * nondaemon thread whenever there is at least one guarder.
@@ -9,7 +8,7 @@ object ExitGuard {
   @volatile private[util] var guards: Option[(Thread, List[Guard])] = None
 
   private[finagle] case class Guard(reason: String) {
-    def unguard() {
+    def unguard(): Unit = {
       ExitGuard.synchronized {
         guards match {
           case Some((thread, gs)) =>
@@ -25,22 +24,22 @@ object ExitGuard {
     }
   }
 
-  private def updateName() {
+  private def updateName(): Unit = {
     for ((t, gs) <- guards)
       t.setName("Finagle ExitGuard count=%d".format(gs.size))
   }
 
-/**
- * Prevent the process from exiting normally. You must retain the returned ExitGuard and call
- * `release` to remove the guard.
- */
+  /**
+   * Prevent the process from exiting normally. You must retain the returned ExitGuard and call
+   * `release` to remove the guard.
+   */
   private[finagle] def guard(reason: String): Guard = {
     val guard = Guard(reason)
     addGuard(guard)
     guard
   }
 
-  private[this] def addGuard(guard: Guard) {
+  private[this] def addGuard(guard: Guard): Unit = {
     synchronized {
       guards match {
         case Some((thread, gs)) =>
@@ -54,13 +53,15 @@ object ExitGuard {
 
   def explainGuards(): String = {
     val snap = synchronized {
-      guards.collect { case((_, gs)) => gs }.getOrElse(Nil)
+      guards.collect { case ((_, gs)) => gs }.getOrElse(Nil)
     }
 
     if (snap.isEmpty) {
       "There are no active guards."
     } else {
-      s"${snap.size} active guard(s):" + snap.map(_.reason).mkString(start="\n", sep="\n", end="")
+      s"${snap.size} active guard(s):" + snap
+        .map(_.reason)
+        .mkString(start = "\n", sep = "\n", end = "")
     }
   }
 
@@ -69,9 +70,10 @@ object ExitGuard {
       setDaemon(false)
       start()
 
-      override def run() {
+      override def run(): Unit = {
         while (true) {
-          try Thread.sleep(Long.MaxValue) catch {
+          try Thread.sleep(Long.MaxValue)
+          catch {
             case _: InterruptedException => return
           }
         }

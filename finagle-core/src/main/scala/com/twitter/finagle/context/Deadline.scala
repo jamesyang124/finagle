@@ -19,7 +19,7 @@ import com.twitter.util.{Duration, Return, Throw, Time, Try}
 case class Deadline(timestamp: Time, deadline: Time) extends Ordered[Deadline] {
   def compare(that: Deadline): Int = this.deadline.compare(that.deadline)
   def expired: Boolean = Time.now > deadline
-  def remaining: Duration = deadline-Time.now
+  def remaining: Duration = deadline - Time.now
 }
 
 /**
@@ -38,7 +38,7 @@ object Deadline extends Contexts.broadcast.Key[Deadline]("com.twitter.finagle.De
    */
   def ofTimeout(timeout: Duration): Deadline = {
     val now = Time.now
-    Deadline(now, now+timeout)
+    Deadline(now, now + timeout)
   }
 
   /**
@@ -61,14 +61,25 @@ object Deadline extends Contexts.broadcast.Key[Deadline]("com.twitter.finagle.De
     Buf.ByteArray.Owned(bytes)
   }
 
+  private[this] def readBigEndianLong(b: Buf, offset: Int): Long = {
+    ((b.get(offset) & 0xff).toLong << 56) |
+      ((b.get(offset + 1) & 0xff).toLong << 48) |
+      ((b.get(offset + 2) & 0xff).toLong << 40) |
+      ((b.get(offset + 3) & 0xff).toLong << 32) |
+      ((b.get(offset + 4) & 0xff).toLong << 24) |
+      ((b.get(offset + 5) & 0xff).toLong << 16) |
+      ((b.get(offset + 6) & 0xff).toLong << 8) |
+      (b.get(offset + 7) & 0xff).toLong
+  }
+
   def tryUnmarshal(body: Buf): Try[Deadline] = {
     if (body.length != 16)
-      return Throw(new IllegalArgumentException(
-        s"Invalid body. Length ${body.length} but required 16"))
+      return Throw(
+        new IllegalArgumentException(s"Invalid body. Length ${body.length} but required 16")
+      )
 
-    val bytes = Buf.ByteArray.Owned.extract(body)
-    val timestamp = ByteArrays.get64be(bytes, 0)
-    val deadline = ByteArrays.get64be(bytes, 8)
+    val timestamp = readBigEndianLong(body, 0)
+    val deadline = readBigEndianLong(body, 8)
 
     Return(Deadline(Time.fromNanoseconds(timestamp), Time.fromNanoseconds(deadline)))
   }

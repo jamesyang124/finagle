@@ -1,8 +1,13 @@
 package com.twitter.finagle.param
 
 import com.twitter.finagle.Stack
-import com.twitter.finagle.ssl.Ssl
-import com.twitter.finagle.transport.{TlsConfig, Transport}
+import com.twitter.finagle.ssl.server.{
+  SslContextServerEngineFactory,
+  SslServerConfiguration,
+  SslServerEngineFactory,
+  SslServerSessionVerifier
+}
+import com.twitter.finagle.transport.Transport
 import javax.net.ssl.SSLContext
 
 /**
@@ -13,44 +18,45 @@ import javax.net.ssl.SSLContext
  * @see [[com.twitter.finagle.param.TransportParams]]
  */
 class ServerTransportParams[A <: Stack.Parameterized[A]](self: Stack.Parameterized[A])
-  extends TransportParams(self) {
+    extends TransportParams(self) {
 
   /**
-   * Enables the TLS/SSL support (connection encrypting) on this server. Only `certificatePath` and
-   * `keyPath` are required to build up a TLS/SSL transport.
-   *
-   * @param certificatePath the path to the PEM encoded X.509 certificate chain
-   *
-   * @param keyPath the path to the corresponding PEM encoded PKCS#8 private key
-   *
-   * @param caCertificatePath the path to the optional PEM encoded CA certificates trusted by this
-   *                          server
-   *
-   * @param ciphers the list of supported ciphers, delimited by `:`
-   *
-   * @param nextProtocols the comma-delimited list of protocols used to perform APN
-   *                      (Application Protocol Negotiation)
+   * Enables SSL/TLS support (connection encrypting) on this server.
+   */
+  def tls(config: SslServerConfiguration): A =
+    self.configured(Transport.ServerSsl(Some(config)))
+
+  /**
+   * Enables SSL/TLS support (connection encrypting) on this server.
+   */
+  def tls(config: SslServerConfiguration, engineFactory: SslServerEngineFactory): A =
+    self
+      .configured(Transport.ServerSsl(Some(config)))
+      .configured(SslServerEngineFactory.Param(engineFactory))
+
+  /**
+   * Enables SSL/TLS support (connection encrypting) on this server.
+   */
+  def tls(config: SslServerConfiguration, sessionVerifier: SslServerSessionVerifier): A =
+    self
+      .configured(Transport.ServerSsl(Some(config)))
+      .configured(SslServerSessionVerifier.Param(sessionVerifier))
+
+  /**
+   * Enables SSL/TLS support (connection encrypting) on this server.
    */
   def tls(
-    certificatePath: String,
-    keyPath: String,
-    caCertificatePath: Option[String],
-    ciphers: Option[String],
-    nextProtocols: Option[String]
-  ): A = self
-    .configured(Transport.TLSServerEngine(Some(() =>
-      Ssl.server(
-        certificatePath, keyPath, caCertificatePath.orNull, ciphers.orNull, nextProtocols.orNull
-      )
-    )))
-    .configured(Transport.Tls(TlsConfig.ServerCertAndKey(
-      certificatePath, keyPath, caCertificatePath, ciphers, nextProtocols
-    )))
+    config: SslServerConfiguration,
+    engineFactory: SslServerEngineFactory,
+    sessionVerifier: SslServerSessionVerifier
+  ): A =
+    self
+      .configured(Transport.ServerSsl(Some(config)))
+      .configured(SslServerEngineFactory.Param(engineFactory))
+      .configured(SslServerSessionVerifier.Param(sessionVerifier))
 
   /**
    * Enables TLS/SSL support (connection encrypting) on this server.
-   *
-   * @note This configuration method is only used to configure Netty 4 transports.
    *
    * @note It's recommended to not use [[SSLContext]] directly, but rely on Finagle to pick
    *       the most efficient TLS/SSL implementation available on your platform.
@@ -58,5 +64,6 @@ class ServerTransportParams[A <: Stack.Parameterized[A]](self: Stack.Parameteriz
    * @param context the SSL context to use
    */
   def tls(context: SSLContext): A =
-    self.configured(Transport.Tls(TlsConfig.ServerSslContext(context)))
+    tls(SslServerConfiguration(), new SslContextServerEngineFactory(context))
+
 }

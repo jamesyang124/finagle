@@ -19,10 +19,14 @@ All Balancers
 **load**
   A gauge of the total load over all nodes being balanced across.
 
-**meanweight**
+**meanweight** `verbosity:debug`
   A gauge tracking the arithmetic mean of the weights of the endpoints
-  being load-balanced across. Does not apply to
-  :src:`HeapBalancer <com/twitter/finagle/loadbalancer/HeapBalancer.scala>`.
+  being load-balanced across.
+
+**num_weight_classes**
+  The number of groups (or classes) of weights in the load balancer. Each class gets
+  a fresh instance of the client's load balancer and receives traffic proportional
+  to its weight.
 
 **adds**
   A counter of the number of hosts added to the loadbalancer.
@@ -47,9 +51,40 @@ All Balancers
   attempts. When this occurs, a non-open node may be selected for that
   request.
 
-ApertureLoadBandBalancer
-<<<<<<<<<<<<<<<<<<<<<<<<
+**algorithm/{type}**
+  A gauge exported with the name of the algorithm used for load balancing.
 
-**aperture**
-  A gauge of the width of the window over which endpoints are
-  load-balanced.
+Aperture Based Load Balancers
+<<<<<<<<<<<<<<<<<<<<<<<<<<<<<
+
+**logical_aperture**
+  A gauge of the width of the window over which endpoints are load-balanced.
+  This is primarily an accounting mechanism and for a true representation of
+  the number of endpoints the client is talking to see `physical_aperture`.
+
+**physical_aperture**
+  When using deterministic aperture (i.e. `useDeterministicOrdering` is set),
+  the width of the window over which endpoints are load-balanced may be
+  wider than the `logical_aperture` gauge. The `physical_aperture` represents
+  this value.
+
+**use_deterministic_ordering**
+  1 if the Aperture implementation uses deterministic ordering
+  0, otherwise.
+
+**vector_hash**
+  A gauge of the hash of the distributors serverset vector with range from
+  [Int.MinValue, Int.MaxValue]. It is useful for identifying inconsistencies
+  in the serverset observed by different instances of the same client since
+  inconsistencies will result in very different values of vector_hash. This
+  information is useful for identifying load banding issues when using the
+  deterministic aperture load balancer which requires a consistent view of
+  the backends to operate correctly.
+
+**coordinate_updates**
+  A counter of the number of times the Aperture implementation receives
+  updates from the `ProcessCoordinate` process global.
+
+**expired**
+  A counter of the number of endpoints which have been closed because they
+  have fallen out of the aperture window and become idle.

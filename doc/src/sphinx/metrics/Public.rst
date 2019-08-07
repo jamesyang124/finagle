@@ -21,7 +21,7 @@ StatsFilter
   as failures, it will use a synthetic Exception,
   ``com.twitter.finagle.service.ResponseClassificationSyntheticException``,
   to account for these. See the
-  `FAQ <http://twitter.github.io/finagle/guide/FAQ.html#what-is-a-com-twitter-finagle-service-responseclassificationsyntheticexception>`_
+  `FAQ <https://twitter.github.io/finagle/guide/FAQ.html#what-is-a-com-twitter-finagle-service-responseclassificationsyntheticexception>`_
   for more details.
 
 **failures**
@@ -72,6 +72,11 @@ ServerStatsFilter
   response without waiting for the response. Large values suggest blocking code
   on a Finagle thread.
 
+**transit_latency_ms**
+  A stat that attempts to measure (wall time) transit times between hops, e.g.,
+  from client to server. Be aware that clock drift between hosts, stop the world
+  pauses, and queue backups can contribute here. Not supported by all protocols.
+
 RequestSemaphoreFilter
 <<<<<<<<<<<<<<<<<<<<<<
 
@@ -84,11 +89,11 @@ RequestSemaphoreFilter
   A gauge of the total number of requests which are waiting because of the limit
   on simultaneous requests.
 
-PayloadSizeFilter (enabled for Mux, HTTP (non-chunked), Thrift)
+PayloadSizeFilter (enabled for Mux, HTTP, Thrift)
 <<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<
 
-**request_payload_bytes**
+**request_payload_bytes** `verbosity:debug`
   A histogram of the number of bytes per request's payload.
 
-**response_payload_bytes**
+**response_payload_bytes** `verbosity:debug`
   A histogram of the number of bytes per response's payload.

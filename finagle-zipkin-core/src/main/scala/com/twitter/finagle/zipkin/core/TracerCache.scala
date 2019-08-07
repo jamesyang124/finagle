@@ -1,7 +1,7 @@
 package com.twitter.finagle.zipkin.core
 
 import collection.JavaConverters._
-import com.twitter.conversions.time._
+import com.twitter.conversions.DurationOps._
 import com.twitter.util.{TimeoutException, Future, Await}
 import java.util.concurrent.ConcurrentHashMap
 
@@ -21,9 +21,9 @@ private[zipkin] class TracerCache[T <: RawZipkinTracer] {
   // down. We give it 100ms.
   Runtime.getRuntime.addShutdownHook(new Thread {
     setName("RawZipkinTracer-ShutdownHook")
-    override def run() {
+    override def run(): Unit = {
       val tracers = synchronized(map.values.toSeq)
-      val joined = Future.join(tracers map(_.flush()))
+      val joined = Future.join(tracers map (_.flush()))
       try {
         Await.result(joined, 100.milliseconds)
       } catch {

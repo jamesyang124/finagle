@@ -12,21 +12,13 @@ import com.twitter.util.Duration
  * lifecycle. Sessions are used in Finagle to maintain liveness, requests cancellation,
  * draining, and much more.
  *
- * @tparam A a [[Stack.Parameterized]] client to configure
+ * @tparam A a [[Stack.Parameterized]] client or server to configure
  */
 class SessionParams[A <: Stack.Parameterized[A]](self: Stack.Parameterized[A]) {
-  /**
-   * Configures the session max idle time `timeout` - the maximum amount of time
-   * a given session is allowed to be idle before it is closed (default: unbounded).
-   *
-   * @see [[https://twitter.github.io/finagle/guide/Clients.html#timeouts-expiration]]
-   */
-  def maxIdleTime(timeout: Duration): A =
-    self.configured(self.params[ExpiringService.Param].copy(idleTime = timeout))
 
   /**
    * Configures the session lifetime `timeout` - the maximum amount of time a given
-   * service is allowed to live before it is closed (default: unbounded).
+   * connection is allowed to live before it is closed (default: unbounded).
    *
    * @see [[https://twitter.github.io/finagle/guide/Clients.html#timeouts-expiration]]
    */

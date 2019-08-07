@@ -3,17 +3,16 @@ package com.twitter.finagle.memcached.protocol.text
 import com.twitter.finagle.memcached.util.ParserUtils
 import com.twitter.io.Buf
 
-private[text] trait Decoder {
+private[text] trait Decoder[Result >: Null] {
+
+  /**
+   * Decode a framed Buf into a Result. This method may emit 'null' to signal 'no message'.
+   */
+  def decode(buffer: Buf): Result
+}
+
+private[text] object Decoder {
   val TokenDelimiter: Byte = ' '
-
-  // Constant for the length of a byte array that will contain a String representation of an Int,
-  // which is used in the Decoder and Framer classes when converting a Buf to an Int
-  private val MaxLengthOfIntString = Int.MinValue.toString.length
-
-  // Array to re-use when converting a Buf to an Int
-  val byteArrayForBuf2Int = ParserUtils.newByteArrayForBuf2Int()
-
-  def decode(buffer: Buf): Decoding
 
   /**
    * Decodes a Buf Memcached line into a Decoding
@@ -31,9 +30,9 @@ private[text] trait Decoder {
     frame: Buf,
     needsData: Seq[Buf] => Int,
     awaitData: (Seq[Buf], Int) => Unit
-  )(continue: Seq[Buf] => Decoding): Decoding = {
-    val bytes = Buf.ByteArray.Owned.extract(frame)
-    val tokens = ParserUtils.split(bytes, TokenDelimiter)
+  )(continue: Seq[Buf] => Decoding
+  ): Decoding = {
+    val tokens = ParserUtils.splitOnWhitespace(frame)
 
     val bytesNeeded = if (tokens.nonEmpty) needsData(tokens) else -1
     if (bytesNeeded == -1) {

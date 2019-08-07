@@ -18,17 +18,17 @@ private[netty4] object Netty4FramedServerChannelInitializer {
  *
  * @param params [[Stack.Params]] to configure the `Channel`.
  */
-private[netty4] class Netty4FramedServerChannelInitializer(
-    params: Stack.Params)
-  extends ChannelInitializer[Channel] {
+private[netty4] class Netty4FramedServerChannelInitializer(params: Stack.Params)
+    extends ChannelInitializer[Channel] {
 
   import Netty4FramedServerChannelInitializer._
 
   private[this] val Logger(logger) = params[Logger]
   private[this] val Stats(stats) = params[Stats]
   private[this] val Transport.Liveness(readTimeout, writeTimeout, _) = params[Transport.Liveness]
-  private[this] val channelRequestStatsHandler =
-    if (!stats.isNull) Some(new ChannelRequestStatsHandler(stats)) else None
+  private[this] val sharedChannelRequestStats =
+    if (!stats.isNull) Some(new ChannelRequestStatsHandler.SharedChannelRequestStats(stats))
+    else None
   private[this] val exceptionHandler = new ChannelExceptionHandler(stats, logger)
 
   override def initChannel(ch: Channel): Unit = {
@@ -44,7 +44,10 @@ private[netty4] class Netty4FramedServerChannelInitializer(
       pipeline.addLast(ReadTimeoutHandlerKey, new ReadTimeoutHandler(timeoutValue, timeoutUnit))
     }
 
-    channelRequestStatsHandler.foreach(pipeline.addLast("channelRequestStatsHandler", _))
+    sharedChannelRequestStats.foreach { sharedStats =>
+      val channelRequestStatsHandler = new ChannelRequestStatsHandler(sharedStats)
+      pipeline.addLast("channelRequestStatsHandler", channelRequestStatsHandler)
+    }
 
     pipeline.addLast("exceptionHandler", exceptionHandler)
   }

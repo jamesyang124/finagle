@@ -21,11 +21,16 @@ private[finagle] case class ThriftClientPreparer(
   clientId: Option[ClientId] = None,
   useCallerSeqIds: Boolean = false) {
 
-  private def prepareService(params: Stack.Params)(
-    service: Service[ThriftClientRequest, Array[Byte]]
+  private def prepareService(
+    params: Stack.Params
+  )(service: Service[ThriftClientRequest, Array[Byte]]
   ): Future[Service[ThriftClientRequest, Array[Byte]]] = {
     val payloadSize = new PayloadSizeFilter[ThriftClientRequest, Array[Byte]](
-      params[param.Stats].statsReceiver, _.message.length, _.length
+      params[param.Stats].statsReceiver,
+      PayloadSizeFilter.ClientReqTraceKey,
+      PayloadSizeFilter.ClientRepTraceKey,
+      _.message.length,
+      _.length
     )
     val Thrift.param.AttemptTTwitterUpgrade(attemptUpgrade) =
       params[Thrift.param.AttemptTTwitterUpgrade]
@@ -72,8 +77,7 @@ private[finagle] case class ThriftClientPreparer(
     // Attempt to upgrade the protocol the first time around by
     // sending a magic method invocation.
     val buffer = new OutputBuffer(protocolFactory)
-    buffer().writeMessageBegin(
-      new TMessage(ThriftTracing.CanTraceMethodName, TMessageType.CALL, 0))
+    buffer().writeMessageBegin(new TMessage(ThriftTracing.CanTraceMethodName, TMessageType.CALL, 0))
 
     val options = new ConnectionOptions
     options.write(buffer())
@@ -88,7 +92,9 @@ private[finagle] case class ThriftClientPreparer(
       val ttwitter = new TTwitterClientFilter(
         serviceName,
         reply.`type` != TMessageType.EXCEPTION,
-        clientId, protocolFactory)
+        clientId,
+        protocolFactory
+      )
       // TODO: also apply this for Protocols.binaryFactory
 
       val seqIdFilter =

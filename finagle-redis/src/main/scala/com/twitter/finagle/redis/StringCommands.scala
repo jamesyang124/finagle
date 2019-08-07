@@ -71,16 +71,16 @@ private[redis] trait StringCommands { self: BaseClient =>
    */
   def get(key: Buf): Future[Option[Buf]] =
     doRequest(Get(key)) {
-      case BulkReply(message)   => Future.value(Some(message))
-      case EmptyBulkReply       => Future.None
-  }
+      case BulkReply(message) => Future.value(Some(message))
+      case EmptyBulkReply => Future.None
+    }
 
   /**
    * Returns the bit value at offset in the string value stored at key.
    *
    * @param key, offset
    * @return the bit value stored at offset.
-   * @see http://redis.io/commands/getbit
+   * @see https://redis.io/commands/getbit
    */
   def getBit(key: Buf, offset: Int): Future[JLong] =
     doRequest(GetBit(key, offset)) {
@@ -97,9 +97,9 @@ private[redis] trait StringCommands { self: BaseClient =>
    */
   def getRange(key: Buf, start: Long, end: Long): Future[Option[Buf]] =
     doRequest(GetRange(key, start, end)) {
-      case BulkReply(message)   => Future.value(Some(message))
-      case EmptyBulkReply       => Future.None
-  }
+      case BulkReply(message) => Future.value(Some(message))
+      case EmptyBulkReply => Future.None
+    }
 
   /**
    * Atomically sets key to value and returns the old value stored at key.
@@ -108,20 +108,20 @@ private[redis] trait StringCommands { self: BaseClient =>
    * @param key, value
    * @return the old value stored at key wrapped in Some,
    *          or None when key did not exist.
-   * @see http://redis.io/commands/getset
+   * @see https://redis.io/commands/getset
    */
   def getSet(key: Buf, value: Buf): Future[Option[Buf]] =
     doRequest(GetSet(key, value)) {
-      case BulkReply(message)   => Future.value(Some(message))
-      case EmptyBulkReply       => Future.value(None)
-  }
+      case BulkReply(message) => Future.value(Some(message))
+      case EmptyBulkReply => Future.value(None)
+    }
 
   /**
    * Increments the number stored at key by one.
    *
    * @param key
    * @return the value of key after the increment.
-   * @see http://redis.io/commands/incr
+   * @see https://redis.io/commands/incr
    */
   def incr(key: Buf): Future[JLong] =
     doRequest(Incr(key)) {
@@ -133,7 +133,7 @@ private[redis] trait StringCommands { self: BaseClient =>
    *
    * @param key, increment
    * @return the value of key after the increment.
-   * @see http://redis.io/commands/incrby
+   * @see https://redis.io/commands/incrby
    */
   def incrBy(key: Buf, increment: Long): Future[JLong] =
     doRequest(IncrBy(key, increment)) {
@@ -145,26 +145,27 @@ private[redis] trait StringCommands { self: BaseClient =>
    *
    * @param keys
    * @return list of values at the specified keys.
-   * @see http://redis.io/commands/mget
+   * @see https://redis.io/commands/mget
    */
   def mGet(keys: Seq[Buf]): Future[Seq[Option[Buf]]] =
     doRequest(MGet(keys)) {
-      case MBulkReply(messages) => Future {
-        messages.map {
-        case BulkReply(message) => Some(message)
-        case EmptyBulkReply     => None
-        case _ => throw new IllegalStateException()
-      }.toSeq
+      case MBulkReply(messages) =>
+        Future {
+          messages.map {
+            case BulkReply(message) => Some(message)
+            case EmptyBulkReply => None
+            case _ => throw new IllegalStateException()
+          }.toSeq
+        }
+      case EmptyMBulkReply => Future.Nil
     }
-    case EmptyMBulkReply       => Future.Nil
-  }
 
   /**
    * Sets the given keys to their respective values. MSET replaces existing
    * values with new values, just as regular SET.
    *
    * @param kv
-   * @see http://redis.io/commands/mset
+   * @see https://redis.io/commands/mset
    */
   def mSet(kv: Map[Buf, Buf]): Future[Unit] =
     doRequest(MSet(kv)) {
@@ -177,7 +178,7 @@ private[redis] trait StringCommands { self: BaseClient =>
    *
    * @param kv
    * @return 1 if all keys were set, 0 if no keys were set.
-   * @see http://redis.io/commands/msetnx
+   * @see https://redis.io/commands/msetnx
    */
   def mSetNx(kv: Map[Buf, Buf]): Future[JBoolean] =
     doRequest(MSetNx(kv)) {
@@ -189,7 +190,7 @@ private[redis] trait StringCommands { self: BaseClient =>
    * time is specified in milliseconds instead of seconds.
    *
    * @param key, millis
-   * @see http://redis.io/commands/psetex
+   * @see https://redis.io/commands/psetex
    */
   def pSetEx(key: Buf, millis: Long, value: Buf): Future[Unit] =
     doRequest(PSetEx(key, millis, value)) {
@@ -213,7 +214,7 @@ private[redis] trait StringCommands { self: BaseClient =>
    *
    * @param key, offset, value
    * @return the original bit value stored at offset.
-   * @see http://redis.io/commands/setbit
+   * @see https://redis.io/commands/setbit
    */
   def setBit(key: Buf, offset: Int, value: Int): Future[JLong] =
     doRequest(SetBit(key, offset, value)) {
@@ -225,7 +226,7 @@ private[redis] trait StringCommands { self: BaseClient =>
    * number of seconds.
    *
    * @param key, seconds, value
-   * @see http://redis.io/commands/setex
+   * @see https://redis.io/commands/setex
    */
   def setEx(key: Buf, seconds: Long, value: Buf): Future[Unit] =
     doRequest(SetEx(key, seconds, value)) {
@@ -238,13 +239,13 @@ private[redis] trait StringCommands { self: BaseClient =>
    *
    * @param key, millis, value
    * @return true if the key was set, false if condition was not met.
-   * @see http://redis.io.commands/set
+   * @see https://redis.io.commands/set
    */
   def setExNx(key: Buf, seconds: Long, value: Buf): Future[JBoolean] =
     doRequest(Set(key, value, Some(InSeconds(seconds)), true, false)) {
       case StatusReply(_) => FutureTrue
       case EmptyBulkReply => FutureFalse
-  }
+    }
 
   /**
    * Set key to hold the string value with the specified expire time in seconds
@@ -252,13 +253,13 @@ private[redis] trait StringCommands { self: BaseClient =>
    *
    * @param key, millis, value
    * @return true if the key was set, false if condition was not met.
-   * @see http://redis.io.commands/set
+   * @see https://redis.io.commands/set
    */
   def setExXx(key: Buf, seconds: Long, value: Buf): Future[JBoolean] =
     doRequest(Set(key, value, Some(InSeconds(seconds)), false, true)) {
       case StatusReply(_) => FutureTrue
       case EmptyBulkReply => FutureFalse
-  }
+    }
 
   /**
    * Set key to hold string value if key does not exist. In that case, it is
@@ -266,7 +267,7 @@ private[redis] trait StringCommands { self: BaseClient =>
    *
    * @param key, value
    * @return 1 if the key was set, 0 if the key was not set.
-   * @see http://redis.io/commands/setnx
+   * @see https://redis.io/commands/setnx
    */
   def setNx(key: Buf, value: Buf): Future[JBoolean] =
     doRequest(SetNx(key, value)) {
@@ -277,7 +278,7 @@ private[redis] trait StringCommands { self: BaseClient =>
    * Set key to hold the string value with the specified expire time in milliseconds.
    *
    * @param key, millis, value
-   * @see http://redis.io.commands/set
+   * @see https://redis.io.commands/set
    */
   def setPx(key: Buf, millis: Long, value: Buf): Future[Unit] =
     doRequest(Set(key, value, Some(InMilliseconds(millis)))) {
@@ -290,13 +291,13 @@ private[redis] trait StringCommands { self: BaseClient =>
    *
    * @param key, millis, value
    * @return true if the key was set, false if condition was not met.
-   * @see http://redis.io.commands/set
+   * @see https://redis.io.commands/set
    */
   def setPxNx(key: Buf, millis: Long, value: Buf): Future[JBoolean] =
     doRequest(Set(key, value, Some(InMilliseconds(millis)), true, false)) {
       case StatusReply(_) => FutureTrue
       case EmptyBulkReply => FutureFalse
-  }
+    }
 
   /**
    * Set key to hold the string value with the specified expire time in milliseconds
@@ -304,26 +305,26 @@ private[redis] trait StringCommands { self: BaseClient =>
    *
    * @param key, millis, value
    * @return true if the key was set, false if condition was not met.
-   * @see http://redis.io.commands/set
+   * @see https://redis.io.commands/set
    */
   def setPxXx(key: Buf, millis: Long, value: Buf): Future[JBoolean] =
     doRequest(Set(key, value, Some(InMilliseconds(millis)), false, true)) {
       case StatusReply(_) => FutureTrue
       case EmptyBulkReply => FutureFalse
-  }
+    }
 
   /**
    * Set key to hold the string value only if the key already exist.
    *
    * @param key, value
    * @return true if the key was set, false if condition was not met.
-   * @see http://redis.io.commands/set
+   * @see https://redis.io.commands/set
    */
   def setXx(key: Buf, value: Buf): Future[JBoolean] =
     doRequest(Set(key, value, None, false, true)) {
       case StatusReply(_) => FutureTrue
       case EmptyBulkReply => FutureFalse
-  }
+    }
 
   /**
    * Overwrites part of the string stored at key, starting at the specified
@@ -331,7 +332,7 @@ private[redis] trait StringCommands { self: BaseClient =>
    *
    * @param key, offset, value
    * @return the length of the string after it was modified.
-   * @see http://redis.io/commands/setrange
+   * @see https://redis.io/commands/setrange
    */
   def setRange(key: Buf, offset: Int, value: Buf): Future[JLong] =
     doRequest(SetRange(key, offset, value)) {
@@ -343,7 +344,7 @@ private[redis] trait StringCommands { self: BaseClient =>
    *
    * @param key
    * @return the length of the string at key, or 0 when key does not exist.
-   * @see http://redis.io/commands/strlen
+   * @see https://redis.io/commands/strlen
    */
   def strlen(key: Buf): Future[JLong] =
     doRequest(Strlen(key)) {

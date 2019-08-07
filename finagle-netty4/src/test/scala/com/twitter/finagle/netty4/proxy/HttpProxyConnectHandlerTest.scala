@@ -1,15 +1,19 @@
 package com.twitter.finagle.netty4.proxy
 
-import com.twitter.finagle.{ChannelClosedException, ConnectionFailedException}
+import com.twitter.finagle.{ChannelClosedException, ProxyConnectException}
+import io.netty.buffer.Unpooled
 import io.netty.channel.{
-  ChannelHandlerAdapter, ChannelPromise, ChannelHandlerContext, ChannelOutboundHandlerAdapter
+  ChannelHandlerAdapter,
+  ChannelHandlerContext,
+  ChannelOutboundHandlerAdapter,
+  ChannelPromise
 }
 import io.netty.channel.embedded.EmbeddedChannel
 import io.netty.handler.codec.http._
 import org.junit.runner.RunWith
-import org.scalatest.{OneInstancePerTest, FunSuite}
+import org.scalatest.{FunSuite, OneInstancePerTest}
 import org.scalatest.junit.JUnitRunner
-import java.net.{SocketAddress, InetSocketAddress}
+import java.net.{InetSocketAddress, SocketAddress}
 
 @RunWith(classOf[JUnitRunner])
 class HttpProxyConnectHandlerTest extends FunSuite with OneInstancePerTest {
@@ -17,7 +21,10 @@ class HttpProxyConnectHandlerTest extends FunSuite with OneInstancePerTest {
   class ConnectPromiseSnooper extends ChannelOutboundHandlerAdapter {
     var promise: ChannelPromise = _
     override def connect(
-      ctx: ChannelHandlerContext, r: SocketAddress, l: SocketAddress, p: ChannelPromise
+      ctx: ChannelHandlerContext,
+      r: SocketAddress,
+      l: SocketAddress,
+      p: ChannelPromise
     ): Unit = {
       promise = p
       // drop connect request
@@ -25,12 +32,11 @@ class HttpProxyConnectHandlerTest extends FunSuite with OneInstancePerTest {
   }
 
   val fakeAddress = InetSocketAddress.createUnresolved("http-proxy", 8081)
-  val emptyCodec = new ChannelHandlerAdapter { }
+  val emptyCodec = new ChannelHandlerAdapter {}
   val connectPromiseSnooper = new ConnectPromiseSnooper
 
   test("connect to proxy (success)") {
-    val channel = new EmbeddedChannel(
-      new HttpProxyConnectHandler("example.com", None, emptyCodec))
+    val channel = new EmbeddedChannel(new HttpProxyConnectHandler("example.com", None, emptyCodec))
 
     val connectPromise = channel.connect(fakeAddress)
     assert(!connectPromise.isDone)
@@ -44,8 +50,8 @@ class HttpProxyConnectHandlerTest extends FunSuite with OneInstancePerTest {
     channel.writeOutbound("pending write")
     assert(channel.outboundMessages().size() == 0)
 
-    channel.writeInbound(
-      new DefaultFullHttpResponse(HttpVersion.HTTP_1_1, HttpResponseStatus.OK))
+    channel.writeInbound(new DefaultHttpResponse(HttpVersion.HTTP_1_1, HttpResponseStatus.OK))
+    channel.writeInbound(LastHttpContent.EMPTY_LAST_CONTENT)
 
     assert(connectPromise.isSuccess)
 
@@ -98,8 +104,7 @@ class HttpProxyConnectHandlerTest extends FunSuite with OneInstancePerTest {
   }
 
   test("connect to proxy (http connect failed)") {
-    val channel = new EmbeddedChannel(
-      new HttpProxyConnectHandler("example.com", None, emptyCodec))
+    val channel = new EmbeddedChannel(new HttpProxyConnectHandler("example.com", None, emptyCodec))
 
     val connectPromise = channel.connect(fakeAddress)
     assert(!connectPromise.isDone)
@@ -108,17 +113,24 @@ class HttpProxyConnectHandlerTest extends FunSuite with OneInstancePerTest {
     channel.writeOutbound("pending write")
     assert(channel.outboundMessages().size() == 0)
 
-    val rep = new DefaultFullHttpResponse(HttpVersion.HTTP_1_1, HttpResponseStatus.BAD_REQUEST)
-    assert(intercept[Exception](channel.writeInbound(rep)).isInstanceOf[ConnectionFailedException])
+    val rep = new DefaultFullHttpResponse(
+      HttpVersion.HTTP_1_1,
+      HttpResponseStatus.BAD_REQUEST,
+      Unpooled.wrappedBuffer("do not talk to me ever again".getBytes("UTF-8"))
+    )
+
+    assert(
+      intercept[Exception](channel.writeInbound(rep.retain())).isInstanceOf[ProxyConnectException]
+    )
     assert(!connectPromise.isSuccess)
-    assert(connectPromise.cause().isInstanceOf[ConnectionFailedException])
+    assert(connectPromise.cause().isInstanceOf[ProxyConnectException])
+    assert(rep.release())
 
     channel.finishAndReleaseAll()
   }
 
   test("connect to proxy (exception caught after connected)") {
-    val channel = new EmbeddedChannel(
-      new HttpProxyConnectHandler("example.com", None, emptyCodec))
+    val channel = new EmbeddedChannel(new HttpProxyConnectHandler("example.com", None, emptyCodec))
 
     val connectPromise = channel.connect(fakeAddress)
     assert(!connectPromise.isDone)

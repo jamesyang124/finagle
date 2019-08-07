@@ -1,28 +1,28 @@
 package com.twitter.finagle.example.stress
 
-import com.google.common.util.concurrent.AtomicLongMap
 import com.twitter.finagle.Service
 import com.twitter.finagle.builder.ClientBuilder
-import com.twitter.finagle.http.{Http, Method, Request, Response, Status, Version}
+import com.twitter.finagle.http.{Method, Request, Response, Status, Version}
 import com.twitter.finagle.stats.SummarizingStatsReceiver
-import com.twitter.util.{Stopwatch, Future}
+import com.twitter.util.{Future, Stopwatch}
 import java.net.{InetSocketAddress, URI}
-import java.util.concurrent.atomic.AtomicInteger
+import java.util.concurrent.ConcurrentHashMap
+import java.util.concurrent.atomic.{AtomicInteger, AtomicLong}
 import scala.collection.JavaConverters._
 
 /**
  * A program to stress an HTTP server. The code below throttles request using an
- * asynchronous semaphore. Specify the uri, concurrency level,  and the total number
+ * asynchronous semaphore. Specify the uri, concurrency level, and the total number
  * of requests at the command line.
  */
 object Stress {
-  def main(args: Array[String]) {
-    val uri           = new URI(args(0))
-    val concurrency   = args(1).toInt
+  def main(args: Array[String]): Unit = {
+    val uri = new URI(args(0))
+    val concurrency = args(1).toInt
     val totalRequests = args(2).toInt
 
-    val errors    = new AtomicInteger(0)
-    val responses = AtomicLongMap.create[Status]()
+    val errors = new AtomicInteger(0)
+    val responses = new ConcurrentHashMap[Status, AtomicLong]()
 
     val request = Request(Version.Http11, Method.Get, uri.getPath)
     request.headerMap.set("Host", uri.getHost)
@@ -30,7 +30,7 @@ object Stress {
     val statsReceiver = new SummarizingStatsReceiver
 
     val client: Service[Request, Response] = ClientBuilder()
-      .codec(Http())
+      .stack(com.twitter.finagle.Http.client)
       .hosts(new InetSocketAddress(uri.getHost, uri.getPort))
       .hostConnectionCoresize(concurrency)
       .reportTo(statsReceiver)
@@ -40,15 +40,21 @@ object Stress {
 
     val completedRequests = new AtomicInteger(0)
 
+    val makeAtomicLong = new java.util.function.Function[Status, AtomicLong]() {
+      def apply(s: Status): AtomicLong = new AtomicLong(0)
+    }
+
     val requests = Future.parallel(concurrency) {
       Future.times(totalRequests / concurrency) {
-        client(request) onSuccess { response =>
-          responses.incrementAndGet(response.status)
-        } handle { case e =>
-          errors.incrementAndGet()
-        } ensure {
-          completedRequests.incrementAndGet()
-        }
+        client(request)
+          .onSuccess { response =>
+            responses.computeIfAbsent(response.status, makeAtomicLong).incrementAndGet()
+          }.handle {
+            case e =>
+              errors.incrementAndGet()
+          }.ensure {
+            completedRequests.incrementAndGet()
+          }
       }
     }
 
@@ -59,12 +65,16 @@ object Stress {
 
       val duration = elapsed()
       println("%20s\t%s".format("Status", "Count"))
-      for ((status, count) <- responses.asMap.asScala)
-        println("%20s\t%d".format(status, count))
+      for ((status, count) <- responses.asScala)
+        println("%20s\t%d".format(status, count.get))
       println("================")
-      println("%d requests completed in %dms (%f requests per second)".format(
-        completedRequests.get, duration.inMilliseconds,
-        totalRequests.toFloat / duration.inMillis.toFloat * 1000))
+      println(
+        "%d requests completed in %dms (%f requests per second)".format(
+          completedRequests.get,
+          duration.inMilliseconds,
+          totalRequests.toFloat / duration.inMillis.toFloat * 1000
+        )
+      )
       println("%d errors".format(errors.get))
 
       println("stats")

@@ -1,11 +1,10 @@
 package com.twitter.finagle.netty4.channel
 
-import io.netty.buffer.ByteBuf
+import io.netty.buffer.{ByteBuf, ByteBufUtil}
 import io.netty.channel._
 import io.netty.channel.ChannelHandler.Sharable
 import java.io.PrintStream
 import java.net.SocketAddress
-import java.nio.charset.Charset
 
 /** Log events on channels */
 private[netty4] trait ChannelSnooper extends ChannelDuplexHandler {
@@ -23,9 +22,9 @@ private[netty4] trait ChannelSnooper extends ChannelDuplexHandler {
   def print(id: ChannelId, indicator: String, message: String): Unit =
     printer(f"${id.asShortText()} $name%6s $indicator $message")
 
-  def inboundIndicator = "(i)"
-  def outboundIndicator = "(o)"
-  def eventIndicator = "(e)"
+  def inboundIndicator: String = "(i)"
+  def outboundIndicator: String = "(o)"
+  def eventIndicator: String = "(e)"
 
   def printInbound(ch: Channel, message: String): Unit =
     print(ch.id, inboundIndicator, message)
@@ -70,16 +69,12 @@ private[netty4] class ByteBufSnooper(val name: String) extends ChannelSnooper {
    * print decoded channel messages
    */
   def dump(printer: (Channel, String) => Unit, ch: Channel, buf: ByteBuf): Unit = {
-    val rawStr = buf.toString(buf.readerIndex, buf.readableBytes, Charset.forName("UTF-8"))
-    val str = rawStr.replaceAll("\r", "\\\\r").replaceAll("\n", "\\\\n")
-    val asciiStr = str.map { c => if (c >= 32 && c < 128) c else '?' }
-
-    for (i <- 0 until asciiStr.length by 60)
-      printer(ch, asciiStr.slice(i, i + 60).lines.mkString("\\n"))
+    printer(ch, ByteBufUtil.hexDump(buf))
   }
 }
 
 /** Log raw channel events without decoding channel messages */
+@Sharable
 private[netty4] class SimpleChannelSnooper(val name: String) extends ChannelSnooper {
 
   // outbound events
@@ -123,7 +118,11 @@ private[netty4] class SimpleChannelSnooper(val name: String) extends ChannelSnoo
     super.connect(ctx, remoteAddress, localAddress, future)
   }
 
-  override def bind(ctx: ChannelHandlerContext, localAddress: SocketAddress, future: ChannelPromise): Unit = {
+  override def bind(
+    ctx: ChannelHandlerContext,
+    localAddress: SocketAddress,
+    future: ChannelPromise
+  ): Unit = {
     printEvent(ctx.channel, "bound to " + localAddress)
     super.bind(ctx, localAddress, future)
   }
@@ -169,14 +168,14 @@ private[netty4] class SimpleChannelSnooper(val name: String) extends ChannelSnoo
     super.exceptionCaught(ctx, cause)
   }
 
-
   override def channelRead(ctx: ChannelHandlerContext, msg: Object): Unit = {
     printInbound(ctx.channel, s"READ ${msg.toString} from ${ctx.channel.remoteAddress}")
     super.channelRead(ctx, msg)
   }
 }
 
-private[netty4] object ChannelSnooper {
+private[finagle] object ChannelSnooper {
+
   /**
    * Makes a ChannelSnooper that will log however you want, printing out the
    * objects.

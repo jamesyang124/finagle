@@ -1,7 +1,7 @@
 package com.twitter.finagle.client
 
-import com.twitter.finagle.factory.BindingFactory
 import com.twitter.finagle.loadbalancer.LoadBalancerFactory
+import com.twitter.finagle.naming.BindingFactory
 import com.twitter.finagle.service.DelayedFactory
 import com.twitter.finagle.{Addr, Name, Stack, Stackable, ServiceFactory}
 import com.twitter.util.Future
@@ -31,7 +31,8 @@ object AddrMetadataExtraction {
       val description = "May extract metadata from the destination address and name"
       val parameters = Seq(
         implicitly[Stack.Param[LoadBalancerFactory.Dest]],
-        implicitly[Stack.Param[BindingFactory.Dest]])
+        implicitly[Stack.Param[BindingFactory.Dest]]
+      )
 
       def make(params: Stack.Params, next: Stack[ServiceFactory[Req, Rep]]) = {
         val LoadBalancerFactory.Dest(addr) = params[LoadBalancerFactory.Dest]
@@ -53,7 +54,7 @@ object AddrMetadataExtraction {
           }.toFuture
 
         val delayed = DelayedFactory.swapOnComplete(futureFactory)
-        Stack.Leaf(this, delayed)
+        Stack.leaf(this, delayed)
       }
     }
 }

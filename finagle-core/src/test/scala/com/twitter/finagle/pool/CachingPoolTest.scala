@@ -1,13 +1,14 @@
 package com.twitter.finagle.pool
 
-import com.twitter.conversions.time._
-import com.twitter.finagle.{Status, Service, ServiceFactory}
-import com.twitter.util.{Await, Duration, MockTimer, Time, Future}
+import com.twitter.conversions.DurationOps._
+import com.twitter.finagle.stats.InMemoryStatsReceiver
+import com.twitter.finagle.{Service, ServiceFactory, Status}
+import com.twitter.util.{Await, Duration, Future, MockTimer, Time}
 import org.junit.runner.RunWith
 import org.mockito.Matchers.any
 import org.mockito.Mockito.{never, times, verify, when}
 import org.scalatest.junit.JUnitRunner
-import org.scalatest.mock.MockitoSugar
+import org.scalatest.mockito.MockitoSugar
 import org.scalatest.{FunSuite, OneInstancePerTest}
 
 @RunWith(classOf[JUnitRunner])
@@ -22,7 +23,6 @@ class CachingPoolTest extends FunSuite with MockitoSugar with OneInstancePerTest
   when(underlyingService.status).thenReturn(Status.Open)
   when(underlyingService(any[Any])).thenReturn(Future.value(obj))
   when(underlying()).thenReturn(Future.value(underlyingService))
-
 
   test("reflect the underlying factory availability") {
     val pool = new CachingPool[Any, Any](underlying, Int.MaxValue, 5.seconds, timer)
@@ -56,6 +56,19 @@ class CachingPoolTest extends FunSuite with MockitoSugar with OneInstancePerTest
 
       assert(timer.tasks.isEmpty)
     }
+  }
+
+  test("insert an instance into the cache a single time even when closed multiple times") {
+    val sr = new InMemoryStatsReceiver
+    def poolsize() = sr.gauges(Seq("pool_cached"))()
+    val cachingPool = new CachingPool[Any, Any](underlying, Int.MaxValue, Duration.Top, timer, sr)
+    val svc1 = Await.result(cachingPool(), 5.seconds)
+    Await.result(svc1.close(), 5.seconds)
+    assert(poolsize() == 1)
+
+    Await.result(svc1.close(), 5.seconds)
+    // not two!
+    assert(poolsize() == 1)
   }
 
   test("do not schedule timer tasks if items never expire") {
@@ -136,7 +149,9 @@ class CachingPoolTest extends FunSuite with MockitoSugar with OneInstancePerTest
 
       verify(underlying, times(3))()
 
-      ss foreach { s => when(s.status).thenReturn(Status.Open) }
+      ss foreach { s =>
+        when(s.status).thenReturn(Status.Open)
+      }
 
       fs foreach { f =>
         timeControl.advance(5.second)
@@ -144,7 +159,9 @@ class CachingPoolTest extends FunSuite with MockitoSugar with OneInstancePerTest
       }
 
       assert(timer.tasks.size == 1)
-      ss foreach { s => verify(s, never()).close(any[Time]) }
+      ss foreach { s =>
+        verify(s, never()).close(any[Time])
+      }
 
       timer.tick()
 
@@ -200,8 +217,8 @@ class CachingPoolTest extends FunSuite with MockitoSugar with OneInstancePerTest
       timer.tick()
 
       verify(underlyingService, never()).close(any[Time])
-
-      service.close()
+      val svc2 = Await.result(cachingPool())
+      svc2.close()
 
       verify(underlyingService, never()).close(any[Time])
       assert(timer.tasks.size == 1)
@@ -248,7 +265,7 @@ class CachingPoolTest extends FunSuite with MockitoSugar with OneInstancePerTest
   }
 
   test("release services as they are released after close()") {
-    Time.withCurrentTimeFrozen { timeControl =>
+    Time.withCurrentTimeFrozen { _ =>
       val cachingPool = new CachingPool[Any, Any](underlying, Int.MaxValue, 5.seconds, timer)
       val underlyingService = mock[Service[Any, Any]]
       when(underlyingService.close(any[Time])).thenReturn(Future.Done)

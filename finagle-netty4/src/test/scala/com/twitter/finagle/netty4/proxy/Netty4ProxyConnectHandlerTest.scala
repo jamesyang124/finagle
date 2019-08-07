@@ -1,10 +1,11 @@
 package com.twitter.finagle.netty4.proxy
 
-import io.netty.buffer.ByteBuf
-import io.netty.channel.Channel
+import com.twitter.finagle.ProxyConnectException
+import io.netty.buffer.{ByteBuf, Unpooled}
+import io.netty.channel.ChannelHandlerContext
 import io.netty.channel.embedded.EmbeddedChannel
-import io.netty.handler.proxy.{ProxyHandler, Socks5ProxyHandler}
-import io.netty.util.concurrent.DefaultPromise
+import io.netty.handler.proxy.{ProxyHandler, ProxyConnectException => NettyProxyConnectException}
+import io.netty.util.concurrent.{Future, GenericFutureListener}
 import org.junit.runner.RunWith
 import org.scalatest.junit.JUnitRunner
 import org.scalatest.{FunSuite, OneInstancePerTest}
@@ -13,65 +14,90 @@ import java.net.InetSocketAddress
 @RunWith(classOf[JUnitRunner])
 class Netty4ProxyConnectHandlerTest extends FunSuite with OneInstancePerTest {
 
-  val fakeAddress = InetSocketAddress.createUnresolved("socks5", 8081)
+  val fakeAddress = InetSocketAddress.createUnresolved("proxy", 0)
 
-  val (handler, channel) = {
-    // We use `Socks5ProxyHandler` in this test, but it doesn't really matter since all tests
-    // here rely on `connectPromise` only.
-    val hd = new Netty4ProxyConnectHandler(new Socks5ProxyHandler(fakeAddress))
-    val ch = new EmbeddedChannel(hd)
+  class FakeProxyHandler extends ProxyHandler(fakeAddress) {
 
-    (hd, ch)
+    private[this] var removedDecoder = false
+    private[this] var removedEncder = false
+
+    def removedCodec: Boolean = removedDecoder && removedEncder
+
+    override def removeDecoder(ctx: ChannelHandlerContext): Unit = {
+      removedDecoder = true
+    }
+
+    override def removeEncoder(ctx: ChannelHandlerContext): Unit = {
+      removedEncder = true
+    }
+
+    override def protocol(): String = "proxy"
+    override def authScheme(): String = "auth"
+    override def addCodec(ctx: ChannelHandlerContext): Unit = ()
+
+    override def handleResponse(ctx: ChannelHandlerContext, response: Any): Boolean = true
+    override def newInitialMessage(ctx: ChannelHandlerContext): AnyRef =
+      Unpooled.wrappedBuffer("connect".getBytes())
   }
 
-  test("upgrades/downgrades the pipeline") {
-    assert(channel.pipeline().get(classOf[ProxyHandler]) != null)
-    channel.pipeline().remove(handler)
-    assert(channel.pipeline().get(classOf[ProxyHandler]) == null)
+  val (handler, fakeHandler, channel) = {
+    val fh = new FakeProxyHandler
+    val hd = new Netty4ProxyConnectHandler(fh)
+    val ch = new EmbeddedChannel(hd)
+
+    (hd, fh, ch)
+  }
+
+  test("canceled before completed connection") {
+    val connectPromise = channel.connect(fakeAddress)
+
+    channel.writeOutbound("foo")
+    channel.readOutbound[ByteBuf]().release() // drops the proxy handshake message
+
+    assert(!connectPromise.isDone)
+
+    assert(connectPromise.cancel(true))
+    assert(!channel.isActive)
+
+    intercept[NettyProxyConnectException] { channel.finishAndReleaseAll() }
   }
 
   test("success") {
-    val connectPromise = handler.connectPromise.asInstanceOf[DefaultPromise[Channel]]
-    assert(!connectPromise.isDone)
-
     val promise = channel.connect(fakeAddress)
     assert(!promise.isDone)
 
     channel.writeOutbound("foo")
     channel.readOutbound[ByteBuf]().release() // drops the proxy handshake message
-    channel.readOutbound[ByteBuf]().release() // drops the proxy handshake message
-
     assert(channel.readOutbound[Any]() == null)
 
-    connectPromise.setSuccess(channel)
+    promise.addListener(new GenericFutureListener[Future[Any]] {
+      def operationComplete(future: Future[Any]): Unit =
+        // The codec should be already removed when connect promise is satsfied.
+        // See https://github.com/netty/netty/issues/6671
+        assert(fakeHandler.removedCodec)
+    })
+
+    channel.writeInbound(Unpooled.wrappedBuffer("connected".getBytes))
+
     assert(promise.isDone)
-
     assert(channel.readOutbound[String]() == "foo")
-
     assert(channel.pipeline().get(classOf[Netty4ProxyConnectHandler]) == null)
     assert(!channel.finishAndReleaseAll())
   }
 
   test("failure") {
-    val connectPromise = handler.connectPromise.asInstanceOf[DefaultPromise[Channel]]
-    assert(!connectPromise.isDone)
-
     val promise = channel.connect(fakeAddress)
     assert(!promise.isDone)
 
     channel.writeOutbound("foo")
     channel.readOutbound[ByteBuf]().release() // drops the proxy handshake message
-    channel.readOutbound[ByteBuf]().release() // drops the proxy handshake message
-
     assert(channel.readOutbound[String]() == null)
 
-    val failure = new Exception()
-    connectPromise.setFailure(failure)
+    channel.pipeline().fireExceptionCaught(new Exception())
+    intercept[Exception](channel.checkException())
+
     assert(promise.isDone)
-
-    assert(intercept[Exception](channel.checkException()) == failure)
-
-    assert(promise.cause == failure)
+    assert(promise.cause.isInstanceOf[ProxyConnectException])
     assert(!channel.finishAndReleaseAll())
   }
 }

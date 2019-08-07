@@ -1,141 +1,115 @@
 package com.twitter.finagle.http2
 
-import com.twitter.finagle.http
 import com.twitter.finagle.client.Transporter
 import com.twitter.finagle.http2.param._
 import com.twitter.finagle.http2.transport._
 import com.twitter.finagle.netty4.Netty4Transporter
-import com.twitter.finagle.netty4.DirectToHeapInboundHandlerName
-import com.twitter.finagle.netty4.channel.{DirectToHeapInboundHandler, BufferingChannelOutboundHandler}
-import com.twitter.finagle.netty4.http.exp.{initClient, Netty4HttpTransporter}
-import com.twitter.finagle.transport.{Transport, TransportProxy}
-import com.twitter.finagle.{Stack, Status}
-import com.twitter.logging.Logger
-import com.twitter.util.{Future, Throw, Return, Promise}
-import io.netty.channel.{
-  ChannelHandlerContext,
-  ChannelInboundHandlerAdapter,
-  ChannelPipeline,
-  ChannelPromise
+import com.twitter.finagle.netty4.http.{
+  HttpCodecName,
+  Netty4HttpTransporter,
+  initClient,
+  newHttpClientCodec
 }
-import io.netty.handler.codec.http._
+import com.twitter.finagle.param.{Timer => TimerParam}
+import com.twitter.finagle.transport.{Transport, TransportContext}
+import com.twitter.finagle.Stack
+import com.twitter.finagle.http2.transport.StreamMessage
+import com.twitter.finagle.netty4.transport.HasExecutor
+import com.twitter.logging.Logger
+import com.twitter.util._
+import io.netty.channel.ChannelPipeline
+import io.netty.handler.codec.http.HttpClientUpgradeHandler.UpgradeEvent
 import io.netty.handler.codec.http2._
 import java.net.SocketAddress
-import java.util.concurrent.ConcurrentHashMap
 
-private[http2] object Http2Transporter {
+private[finagle] object Http2Transporter {
 
-  def apply(params: Stack.Params): Transporter[Any, Any] = {
-    // current http2 client implementation doesn't support
-    // netty-style backpressure
-    // https://github.com/netty/netty/issues/3667#issue-69640214
-    val underlying = Netty4Transporter[Any, Any](
-      init(params),
-      params + Netty4Transporter.Backpressure(false)
+  private val log = Logger.get()
+
+  def apply(params: Stack.Params, addr: SocketAddress): Transporter[Any, Any, TransportContext] = {
+    // This http2 client implementation doesn't support netty-style back pressure so
+    // we disable it. See the MultiplexCodec based client for backpressure support.
+    val underlying = Netty4Transporter.raw[Any, Any](
+      pipelineInit = init(params),
+      addr = addr,
+      params = params + Netty4Transporter.Backpressure(false)
     )
 
     val PriorKnowledge(priorKnowledge) = params[PriorKnowledge]
+    val Transport.ClientSsl(config) = params[Transport.ClientSsl]
+    val tlsEnabled = config.isDefined
 
-    if (priorKnowledge) {
-      new PriorKnowledgeTransporter(underlying)
+    // prior knowledge is only used with h2c
+    if (!tlsEnabled && priorKnowledge) {
+      new PriorKnowledgeTransporter(underlying, params)
     } else {
-      val underlyingHttp11 = Netty4HttpTransporter(params)
-
-      new Http2Transporter(underlying, underlyingHttp11)
-    }
-  }
-
-  /**
-   * Buffers until `channelActive` so we can ensure the connection preface is
-   * the first message we send.
-   */
-  class BufferingHandler
-    extends ChannelInboundHandlerAdapter
-    with BufferingChannelOutboundHandler { self =>
-
-    override def channelActive(ctx: ChannelHandlerContext): Unit = {
-      ctx.fireChannelActive()
-      // removing a BufferingChannelOutboundHandler writes and flushes too.
-      ctx.pipeline.remove(self)
-    }
-
-    def bind(ctx: ChannelHandlerContext, addr: SocketAddress, promise: ChannelPromise): Unit = {
-      ctx.bind(addr, promise)
-    }
-    def close(ctx: ChannelHandlerContext, promise: ChannelPromise): Unit = {
-      ctx.close(promise)
-    }
-    def connect(
-      ctx: ChannelHandlerContext,
-      local: SocketAddress,
-      remote: SocketAddress,
-      promise: ChannelPromise
-    ): Unit = {
-      ctx.connect(local, remote, promise)
-    }
-    def deregister(ctx: ChannelHandlerContext, promise: ChannelPromise): Unit = {
-      ctx.deregister(promise)
-    }
-    def disconnect(ctx: ChannelHandlerContext, promise: ChannelPromise): Unit = {
-      ctx.disconnect(promise)
-    }
-    def read(ctx: ChannelHandlerContext): Unit = {
-      ctx.read()
+      val underlyingHttp11 = Netty4HttpTransporter(params)(addr)
+      val TimerParam(timer) = params[TimerParam]
+      new Http2Transporter(underlying, underlyingHttp11, tlsEnabled, params, timer)
     }
   }
 
   // constructing an http2 cleartext transport
-  private[http2] def init(params: Stack.Params): ChannelPipeline => Unit =
-    { pipeline: ChannelPipeline =>
-      pipeline.addLast(DirectToHeapInboundHandlerName, DirectToHeapInboundHandler)
-      val connection = new DefaultHttp2Connection(false /*server*/)
-
-      // decompresses data frames according to the content-encoding header
-      val adapter = new DelegatingDecompressorFrameListener(
-        connection,
-        // adapts http2 to http 1.1
-        new Http2ClientDowngrader(connection)
-      )
-
+  private[http2] def init(params: Stack.Params): ChannelPipeline => Unit = {
+    pipeline: ChannelPipeline =>
       val EncoderIgnoreMaxHeaderListSize(ignoreMaxHeaderListSize) =
         params[EncoderIgnoreMaxHeaderListSize]
+      val sensitivityDetector = params[HeaderSensitivity].sensitivityDetector
 
-      val connectionHandler = new RichHttpToHttp2ConnectionHandlerBuilder()
-        .frameListener(adapter)
+      val connection = new DefaultHttp2Connection(false /*server*/ )
+
+      val connectionHandlerBuilder = new RichHttpToHttp2ConnectionHandlerBuilder()
+        .frameListener(new Http2ClientDowngrader(connection))
         .connection(connection)
-        .initialSettings(Settings.fromParams(params))
+        .initialSettings(Settings.fromParams(params, isServer = false))
         .encoderIgnoreMaxHeaderListSize(ignoreMaxHeaderListSize)
-        .build()
+        .headerSensitivityDetector(new Http2HeadersEncoder.SensitivityDetector {
+          def isSensitive(name: CharSequence, value: CharSequence): Boolean = {
+            sensitivityDetector(name, value)
+          }
+        })
+
+      if (params[FrameLogging].enabled) {
+        connectionHandlerBuilder.frameLogger(
+          new LoggerPerFrameTypeLogger(params[FrameLoggerNamePrefix].loggerNamePrefix))
+      }
 
       val PriorKnowledge(priorKnowledge) = params[PriorKnowledge]
-      if (priorKnowledge) {
-        pipeline.addLast("httpCodec", connectionHandler)
-        pipeline.addLast("buffer", new BufferingHandler())
-        pipeline.addLast("aggregate", new AdapterProxyChannelHandler({ pipeline =>
-          pipeline.addLast("schemifier", new SchemifyingHandler("http"))
-          initClient(params)(pipeline)
-        }))
-      } else {
-        val maxChunkSize = params[http.param.MaxChunkSize].size
-        val maxHeaderSize = params[http.param.MaxHeaderSize].size
-        val maxInitialLineSize = params[http.param.MaxInitialLineSize].size
+      val Transport.ClientSsl(config) = params[Transport.ClientSsl]
+      val tlsEnabled = config.isDefined
 
-        val sourceCodec = new HttpClientCodec(
-          maxInitialLineSize.inBytes.toInt,
-          maxHeaderSize.inBytes.toInt,
-          maxChunkSize.inBytes.toInt
+      if (tlsEnabled) {
+        val buffer = BufferingHandler.alpn()
+        val connectionHandler = connectionHandlerBuilder
+          .onActive { () =>
+            // need to stop buffering after we've sent the connection preface
+            pipeline.remove(buffer)
+          }
+          .build()
+        pipeline.addLast("alpn", new ClientNpnOrAlpnHandler(connectionHandler, params))
+        pipeline.addLast(BufferingHandler.HandlerName, buffer)
+      } else if (priorKnowledge) {
+        val connectionHandler = connectionHandlerBuilder.build()
+        pipeline.addLast(HttpCodecName, connectionHandler)
+        pipeline.addLast(BufferingHandler.HandlerName, BufferingHandler.priorKnowledge())
+        pipeline.addLast(
+          AdapterProxyChannelHandler.HandlerName,
+          new AdapterProxyChannelHandler({ pipeline =>
+            pipeline.addLast(SchemifyingHandler.HandlerName, new SchemifyingHandler("http"))
+            pipeline.addLast(StripHeadersHandler.HandlerName, StripHeadersHandler)
+            initClient(params)(pipeline)
+          })
         )
-        val upgradeCodec = new Http2ClientUpgradeCodec(connectionHandler)
-        val upgradeHandler = new HttpClientUpgradeHandler(sourceCodec, upgradeCodec, Int.MaxValue)
-        pipeline.addLast("httpCodec", sourceCodec)
-        pipeline.addLast("httpUpgradeHandler", upgradeHandler)
-        pipeline.addLast(UpgradeRequestHandler.HandlerName, new UpgradeRequestHandler(params))
+      } else {
+        val sourceCodec = newHttpClientCodec(params)
+        pipeline.addLast(HttpCodecName, sourceCodec)
+        pipeline.addLast(
+          UpgradeRequestHandler.HandlerName,
+          new UpgradeRequestHandler(params, sourceCodec, connectionHandlerBuilder)
+        )
         initClient(params)(pipeline)
       }
-    }
-
-  def unsafeCast(t: Transport[HttpObject, HttpObject]): Transport[Any, Any] =
-    t.map(_.asInstanceOf[HttpObject], _.asInstanceOf[Any])
+  }
 }
 
 /**
@@ -158,87 +132,76 @@ private[http2] object Http2Transporter {
  * doesn't attempt to upgrade.
  */
 private[http2] class Http2Transporter(
-    underlying: Transporter[Any, Any],
-    underlyingHttp11: Transporter[Any, Any])
-  extends Transporter[Any, Any] {
+  underlying: Transporter[Any, Any, TransportContext],
+  underlyingHttp11: Transporter[Any, Any, TransportContext],
+  alpnUpgrade: Boolean,
+  params: Stack.Params,
+  implicit val timer: Timer)
+    extends Http2NegotiatingTransporter(
+      params,
+      underlyingHttp11,
+      fallbackToHttp11WhileNegotiating = !alpnUpgrade
+    ) { self =>
 
-  private[this] val log = Logger.get()
+  import Http2Transporter.log
 
-  import Http2Transporter._
+  protected def attemptUpgrade(): (Future[Option[ClientSession]], Future[Transport[Any, Any]]) = {
+    val clientSessionF = Promise[Option[ClientSession]]()
 
-  protected[this] val transporterCache =
-    new ConcurrentHashMap[SocketAddress, Future[Option[() => Transport[HttpObject, HttpObject]]]]()
+    val firstTransport: Future[Transport[Any, Any]] = underlying().transform {
+      case Return(trans) =>
+        if (alpnUpgrade) {
+          trans.read().transform {
+            case Return(UpgradeEvent.UPGRADE_REJECTED) =>
+              clientSessionF.setValue(None)
+              // we continue using the same transport, since by now it has
+              // been transformed into an http/1.1 connection.
+              Future.value(trans)
 
-  private[this] def onUpgradeFinished(
-    f: Future[Option[() => Transport[HttpObject, HttpObject]]],
-    addr: SocketAddress
-  ): Future[Transport[Any, Any]] = f.transform {
-    case Return(Some(fn)) => Future.value(unsafeCast(fn()))
-    case Return(None) =>
-      // we didn't upgrade
-      underlyingHttp11(addr)
-    case Throw(exn) =>
-      // kick us out of the cache so we can try to reestablish the connection
-      transporterCache.remove(addr, f)
-      apply(addr)
-  }
+            case Return(UpgradeEvent.UPGRADE_SUCCESSFUL) =>
+              val inOutCasted = Transport.cast[StreamMessage, StreamMessage](trans)
+              val contextCasted =
+                inOutCasted.asInstanceOf[
+                  Transport[StreamMessage, StreamMessage] {
+                    type Context = TransportContext with HasExecutor
+                  }
+                ]
 
-  // uses http11 underneath, but marks itself as dead if the upgrade succeeds or
-  // the connection fails
-  private[this] def onUpgradeInProgress(
-    f: Future[Option[_]]
-  ): Transport[Any, Any] => Transport[Any, Any] = { http11: Transport[Any, Any] =>
-    val ref = new RefTransport(http11)
-    f.respond {
-      case Return(None) => // we failed the upgrade, so we can keep the connection
-      case _ =>
-        // we shut down if we pass the upgrade or fail entirely
-        // we're assuming here that a well behaved dispatcher will propagate our status to a pool
-        // that will close us
-        // TODO: if we fail entirely, we should try to reregister on the new connection attempt
-        ref.update { trans =>
-          new TransportProxy[Any, Any](trans) {
-            def write(any: Any): Future[Unit] = trans.write(any)
-            def read(): Future[Any] = trans.read()
-            override def status: Status = Status.Closed
+              val streamTransportFactory =
+                new StreamTransportFactory(contextCasted, trans.context.remoteAddress, params)
+
+              clientSessionF.setValue(Some(streamTransportFactory))
+              streamTransportFactory.newChildTransport()
+
+            case Return(msg) =>
+              log.error(s"Non-upgrade event detected $msg")
+              trans.close()
+              clientSessionF.setValue(None)
+              underlyingHttp11()
+
+            case Throw(exn) =>
+              log.error(
+                exn,
+                "Failed to clearly negotiate either HTTP/2 or HTTP/1.1.  " +
+                  "Falling back to HTTP/1.1."
+              )
+              trans.close()
+              clientSessionF.setValue(None)
+              underlyingHttp11()
           }
-        }
-    }
-    ref
-  }
-
-  private[this] def upgrade(addr: SocketAddress): Future[Transport[Any, Any]] = {
-    val conn: Future[Transport[Any, Any]] = underlying(addr)
-    val p = Promise[Option[() => Transport[HttpObject, HttpObject]]]()
-    if (transporterCache.putIfAbsent(addr, p) == null) {
-      conn.transform {
-        case Return(trans) =>
+        } else {
           val ref = new RefTransport(trans)
           ref.update { t =>
-            t.onClose.ensure {
-              transporterCache.remove(addr, p)
-            }
-            new Http2UpgradingTransport(t, ref, p)
+            new Http2UpgradingTransport(t, ref, clientSessionF, params, () => this.http1Status)
           }
           Future.value(ref)
-        case Throw(e) =>
-          p.setException(e)
-          Future.exception(e)
-      }
-    } else apply(addr)
-  }
-
-  final def apply(addr: SocketAddress): Future[Transport[Any, Any]] =
-    Option(transporterCache.get(addr)) match {
-      case Some(f) =>
-        if (f.isDefined) {
-          onUpgradeFinished(f, addr)
-        } else {
-          // fall back to http/1.1 while upgrading
-          val conn = underlyingHttp11(addr)
-          conn.map(onUpgradeInProgress(f))
         }
-      case None =>
-        upgrade(addr)
+
+      case Throw(e) =>
+        clientSessionF.setException(e)
+        Future.exception(e)
     }
+
+    clientSessionF -> firstTransport
+  }
 }

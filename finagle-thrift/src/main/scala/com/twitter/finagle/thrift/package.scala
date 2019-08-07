@@ -1,7 +1,10 @@
 package com.twitter.finagle
 
+import com.twitter.app.GlobalFlag
 import com.twitter.finagle.stats.DefaultStatsReceiver
 import com.twitter.finagle.toggle.{StandardToggleMap, ToggleMap}
+import com.twitter.util.StorageUnit
+import com.twitter.conversions.StorageUnitOps._
 
 /**
  * =Deprecation=
@@ -12,10 +15,10 @@ import com.twitter.finagle.toggle.{StandardToggleMap, ToggleMap}
  * ==Thrift codecs==
  *
  * We provide client and server protocol support for the framed protocol.
- * The public implementations are:
+ * The public implementations are defined on the Thrift object:
  *
- *  - [[com.twitter.finagle.thrift.ThriftClientFramedCodec]]
- *  - [[com.twitter.finagle.thrift.ThriftServerFramedCodec]]
+ *  - [[com.twitter.finagle.Thrift.client]]
+ *  - [[com.twitter.finagle.Thrift.server]]
  *
  * The type of the server codec is `Service[Array[Byte], Array[Byte]]`
  * and the client codecs are `Service[ThriftClientRequest,
@@ -25,12 +28,12 @@ import com.twitter.finagle.toggle.{StandardToggleMap, ToggleMap}
  * thrift `ProtocolFactory`.
  *
  * These transports are used by the services produced by the
- * [[https://github.com/mariusaeriksen/thrift-0.5.0-finagle finagle thrift codegenerator]].
+ * [[https://github.com/mariusaeriksen/thrift-finagle finagle thrift codegenerator]].
  *
  * {{{
  * val service: Service[ThriftClientRequest, Array[Byte]] = ClientBuilder()
  *   .hosts("foobar.com:123")
- *   .codec(ThriftClientFramedCodec())
+ *   .stack(Thrift.client)
  *   .build()
  *
  * // Wrap the raw Thrift transport in a Client decorator. The client
@@ -45,6 +48,12 @@ import com.twitter.finagle.toggle.{StandardToggleMap, ToggleMap}
  */
 package object thrift {
 
+  object maxReusableBufferSize
+      extends GlobalFlag[StorageUnit](
+        16.kilobytes,
+        "Max size (bytes) for ThriftServicePerEndpoint reusable transport buffer"
+      )
+
   /**
    * The name of the finagle-thrift [[ToggleMap]].
    */
@@ -56,4 +65,3 @@ package object thrift {
   private[finagle] val Toggles: ToggleMap =
     StandardToggleMap(LibraryName, DefaultStatsReceiver)
 }
-

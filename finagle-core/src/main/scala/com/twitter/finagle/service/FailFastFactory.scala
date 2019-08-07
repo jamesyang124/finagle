@@ -1,6 +1,6 @@
 package com.twitter.finagle.service
 
-import com.twitter.conversions.time._
+import com.twitter.conversions.DurationOps._
 import com.twitter.finagle._
 import com.twitter.finagle.client.Transporter
 import com.twitter.finagle.stats.StatsReceiver
@@ -13,17 +13,23 @@ object FailFastFactory {
   private sealed trait State
   private case object Ok extends State
   private case class Retrying(
-      since: Time,
-      task: TimerTask,
-      ntries: Int,
-      backoffs: Stream[Duration])
-    extends State
+    lastFailure: Future[Nothing],
+    since: Time,
+    task: TimerTask,
+    ntries: Int,
+    backoffs: Stream[Duration])
+      extends State
 
-  private val url = "https://twitter.github.io/finagle/guide/FAQ.html#why-do-clients-see-com-twitter-finagle-failedfastexception-s"
+  private val url =
+    "https://twitter.github.io/finagle/guide/FAQ.html#why-do-clients-see-com-twitter-finagle-failedfastexception-s"
 
-  private object Observation extends Enumeration {
-    type t = Value
-    val Success, Fail, Timeout, TimeoutFail, Close = Value
+  private sealed trait Observation
+  private object Observation {
+    final case class Fail(failure: Throwable) extends Observation
+    final case class TimeoutFail(failure: Throwable) extends Observation
+    object Timeout extends Observation
+    object Close extends Observation
+    object Success extends Observation
   }
 
   // put a reasonably sized cap on the number of jittered backoffs so that a
@@ -61,7 +67,8 @@ object FailFastFactory {
       param.Label,
       param.Logger,
       Transporter.EndpointAddr,
-      ServiceFactory[Req, Rep]] {
+      ServiceFactory[Req, Rep]
+    ] {
       val role = FailFastFactory.role
       val description = "Backoff exponentially from hosts to which we cannot establish a connection"
       def make(
@@ -83,7 +90,14 @@ object FailFastFactory {
             val param.Logger(logger) = _logger
             val Transporter.EndpointAddr(endpoint) = _endpoint
 
-            new FailFastFactory(next, statsReceiver.scope("failfast"), timer, label, logger, endpoint)
+            new FailFastFactory(
+              next,
+              statsReceiver.scope("failfast"),
+              timer,
+              label,
+              logger,
+              endpoint
+            )
         }
       }
     }
@@ -106,85 +120,93 @@ object FailFastFactory {
  *      for more details.
  */
 private[finagle] class FailFastFactory[Req, Rep](
-    underlying: ServiceFactory[Req, Rep],
-    statsReceiver: StatsReceiver,
-    timer: Timer,
-    label: String,
-    logger: Logger = DefaultLogger,
-    endpoint: Address = Address.failing,
-    backoffs: Stream[Duration] = FailFastFactory.defaultBackoffs)
-  extends ServiceFactoryProxy(underlying) {
+  underlying: ServiceFactory[Req, Rep],
+  statsReceiver: StatsReceiver,
+  timer: Timer,
+  label: String,
+  logger: Logger = DefaultLogger,
+  endpoint: Address = Address.failing,
+  backoffs: Stream[Duration] = FailFastFactory.defaultBackoffs)
+    extends ServiceFactoryProxy(underlying) {
   import FailFastFactory._
 
-  private[this] val exc = new FailedFastException(s"Endpoint $label is marked down. For more details see: $url")
+  @volatile private[this] var state: State = Ok
 
-  private[this] val futureExc = Future.exception(exc)
+  private[this] final def failWith(t: Throwable): Future[Nothing] = Future.exception(
+    new FailedFastException(s"Endpoint $label is marked down. For more details see: $url", t)
+  )
 
   private[this] val markedAvailableCounter = statsReceiver.counter("marked_available")
   private[this] val markedDeadCounter = statsReceiver.counter("marked_dead")
 
-  private[this] val unhealthyForMsGauge =
+  private[this] val gauges = Seq(
     statsReceiver.addGauge("unhealthy_for_ms") {
       state match {
         case r: Retrying => r.since.untilNow.inMilliseconds
         case _ => 0
       }
-    }
-
-  private[this] val unhealthyNumRetriesGauge =
+    },
     statsReceiver.addGauge("unhealthy_num_tries") {
       state match {
         case r: Retrying => r.ntries
         case _ => 0
       }
+    },
+    statsReceiver.addGauge("is_marked_dead") {
+      state match {
+        case _: Retrying => 1
+        case _ => 0
+      }
     }
+  )
 
-  @volatile private[this] var state: State = Ok
+  private[this] val update = new Updater[Observation] {
+    def preprocess(elems: Seq[Observation]): Seq[Observation] = elems
 
-  private[this] val update = new Updater[Observation.t] {
-    def preprocess(elems: Seq[Observation.t]) = elems
-
-    def handle(o: Observation.t) = o match {
+    def handle(o: Observation): Unit = o match {
       case Observation.Success if state != Ok =>
-        val Retrying(_, task, _, _) = state
+        val Retrying(_, _, task, _, _) = state
         task.cancel()
         markedAvailableCounter.incr()
         state = Ok
 
-      case Observation.Fail if state == Ok =>
+      case Observation.Fail(failure) if state == Ok =>
         val (wait, rest) = backoffs match {
           case Stream.Empty => (Duration.Zero, Stream.empty[Duration])
-          case wait #:: rest => (wait, rest)
+          case w #:: r => (w, r)
         }
         val now = Time.now
         val task = timer.schedule(now + wait) { this.apply(Observation.Timeout) }
         markedDeadCounter.incr()
 
         if (logger.isLoggable(Level.DEBUG))
-          logger.log(Level.DEBUG, s"""FailFastFactory marking connection to "$label" as dead. Remote Address: ${endpoint.toString}""")
+          logger.log(
+            Level.DEBUG,
+            s"""FailFastFactory marking connection to "$label" as dead. Remote Address: ${endpoint.toString}"""
+          )
 
-        state = Retrying(now, task, 0, rest)
+        state = Retrying(failWith(failure), now, task, 0, rest)
 
       case Observation.Timeout if state != Ok =>
         underlying(ClientConnection.nil).respond {
-          case Throw(_) => this.apply(Observation.TimeoutFail)
+          case Throw(t) => this.apply(Observation.TimeoutFail(t))
           case Return(service) =>
             this.apply(Observation.Success)
             service.close()
         }
 
-      case Observation.TimeoutFail if state != Ok =>
+      case Observation.TimeoutFail(failure) if state != Ok =>
         state match {
-          case Retrying(_, task, _, Stream.Empty) =>
+          case Retrying(_, _, task, _, Stream.Empty) =>
             task.cancel()
             // Backoff schedule exhausted. Optimistically become available in
             // order to continue trying.
             state = Ok
 
-          case Retrying(since, task, ntries, wait #:: rest) =>
+          case Retrying(_, since, task, ntries, wait #:: rest) =>
             task.cancel()
             val newTask = timer.schedule(Time.now + wait) { this.apply(Observation.Timeout) }
-            state = Retrying(since, newTask, ntries+1, rest)
+            state = Retrying(failWith(failure), since, newTask, ntries + 1, rest)
 
           case Ok => assert(false)
         }
@@ -193,7 +215,7 @@ private[finagle] class FailFastFactory[Req, Rep](
         val oldState = state
         state = Ok
         oldState match {
-          case Retrying(_, task, _, _) =>
+          case Retrying(_, _, task, _, _) =>
             task.cancel()
           case _ =>
         }
@@ -203,23 +225,25 @@ private[finagle] class FailFastFactory[Req, Rep](
     }
   }
 
-  override def apply(conn: ClientConnection): Future[Service[Req, Rep]] = {
-    if (state != Ok) futureExc else {
+  override def apply(conn: ClientConnection): Future[Service[Req, Rep]] = state match {
+    case Retrying(lastFailure, _, _, _, _) => lastFailure
+    case Ok =>
       underlying(conn).respond {
-        case Throw(_) => update(Observation.Fail)
+        case Throw(t) => update(Observation.Fail(t))
         case Return(_) if state != Ok => update(Observation.Success)
         case _ =>
       }
-    }
   }
-  override def status = state match {
+
+  override def status: Status = state match {
     case Ok => underlying.status
     case _: Retrying => Status.Busy
   }
 
-  override val toString = "fail_fast_%s".format(underlying.toString)
+  override val toString: String = s"fail_fast_$underlying"
 
   override def close(deadline: Time): Future[Unit] = {
+    gauges.foreach(_.remove())
     update(Observation.Close)
     underlying.close(deadline)
   }

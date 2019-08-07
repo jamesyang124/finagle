@@ -31,22 +31,22 @@ import com.twitter.util._
  * @param timer Timer used to schedule retries
  *
  * @note consider using a [[Timer]] with high resolution so there is
- * less correlation between retries. For example [[HighResTimer.Default]]
+ * less correlation between retries. For example [[com.twitter.finagle.util.DefaultTimer]]
  *
  * @see The [[https://twitter.github.io/finagle/guide/Servers.html#request-timeout user guide]]
  *      for more details.
  */
 private[finagle] class RequeueFilter[Req, Rep](
-    retryBudget: RetryBudget,
-    retryBackoffs: Stream[Duration],
-    statsReceiver: StatsReceiver,
-    canRetry: () => Boolean,
-    maxRetriesPerReq: Double,
-    timer: Timer)
-  extends SimpleFilter[Req, Rep] {
+  retryBudget: RetryBudget,
+  retryBackoffs: Stream[Duration],
+  statsReceiver: StatsReceiver,
+  canRetry: () => Boolean,
+  maxRetriesPerReq: Double,
+  timer: Timer)
+    extends SimpleFilter[Req, Rep] {
+  import RequeueFilter.Requeueable
 
-  require(maxRetriesPerReq >= 0,
-    s"maxRetriesPerReq must be non-negative: $maxRetriesPerReq")
+  require(maxRetriesPerReq >= 0, s"maxRetriesPerReq must be non-negative: $maxRetriesPerReq")
 
   private[this] val requeueCounter = statsReceiver.counter("requeues")
   private[this] val budgetExhaustCounter = statsReceiver.counter("budget_exhausted")
@@ -54,10 +54,7 @@ private[finagle] class RequeueFilter[Req, Rep](
   private[this] val requeueStat = statsReceiver.stat("requeues_per_request")
   private[this] val canNotRetryCounter = statsReceiver.counter("cannot_retry")
 
-  private[this] def responseFuture(
-    attempt: Int,
-    t: Try[Rep]
-  ): Future[Rep] = {
+  private[this] def responseFuture(attempt: Int, t: Try[Rep]): Future[Rep] = {
     requeueStat.add(attempt)
     Future.const(t)
   }
@@ -71,7 +68,7 @@ private[finagle] class RequeueFilter[Req, Rep](
   ): Future[Rep] = {
     Contexts.broadcast.let(context.Retries, context.Retries(attempt)) {
       service(req).transform {
-        case t@Throw(RetryPolicy.RetryableWriteException(_)) =>
+        case t @ Throw(Requeueable(_)) =>
           if (!canRetry()) {
             canNotRetryCounter.incr()
             responseFuture(attempt, t)
@@ -83,21 +80,23 @@ private[finagle] class RequeueFilter[Req, Rep](
                 applyService(req, service, attempt + 1, retriesRemaining - 1, rest)
               case delay #:: rest =>
                 // Delay and then retry.
-                timer.doLater(delay) {
-                  requeueCounter.incr()
-                  applyService(req, service, attempt + 1, retriesRemaining - 1, rest)
-                }.flatten
+                timer
+                  .doLater(delay) {
+                    requeueCounter.incr()
+                    applyService(req, service, attempt + 1, retriesRemaining - 1, rest)
+                  }
+                  .flatten
               case _ =>
                 // Schedule has run out of entries. Budget is empty.
                 budgetExhaustCounter.incr()
-                responseFuture(attempt, t)
+                responseFuture(attempt, t).transform(FailureFlags.asNonRetryable)
             }
           } else {
             if (retriesRemaining > 0)
               budgetExhaustCounter.incr()
             else
               requestLimitCounter.incr()
-            responseFuture(attempt, t)
+            responseFuture(attempt, t).transform(FailureFlags.asNonRetryable)
           }
         case t =>
           responseFuture(attempt, t)
@@ -110,4 +109,16 @@ private[finagle] class RequeueFilter[Req, Rep](
     val maxRetries = Math.ceil(maxRetriesPerReq * retryBudget.balance).toInt
     applyService(req, service, 0, maxRetries, retryBackoffs)
   }
+}
+
+object RequeueFilter {
+
+  /**
+   * An extractor for exceptions which are known to be safe to retry.
+   */
+  object Requeueable {
+    def unapply(t: Throwable): Option[Throwable] =
+      RetryPolicy.RetryableWriteException.unapply(t)
+  }
+
 }

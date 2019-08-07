@@ -45,12 +45,54 @@ Finagle clients come with a variety of transport-level parameters that not only 
 options, but also upgrade the transport protocol to support encryption (e.g. TLS/SSL) and proxy
 servers (e.g. HTTP, SOCKS5).
 
+
+Transport Security
+------------------
+
+Finagle has robust support for TLS. The most common options such as server validation are accessible
+directly via the `tls` members of :src:`ClientTransportParams <com/twitter/finagle/param/ClientTransportParams.scala>`
+as follows:
+
+
+.. code-block:: scala
+
+  import com.twitter.finagle.{Service, Http}
+  import com.twitter.finagle.http.{Request, Response}
+
+  val twitter: Service[Request, Response] = Http.client
+    .withTransport.tls("twitter.com")
+    .newService("twitter.com:443")
+
+There are further configuration options including client authentication accessible via :src:`ClientTransportParams <com/twitter/finagle/param/ClientTransportParams.scala>`.
+
+
+Finagle also supports `SPNEGO <https://en.wikipedia.org/wiki/SPNEGO>`_ which is an HTTP specific
+extension for negotiating security schemes. A common use case for SPNEGO is for authentication in `Kerberos <https://en.wikipedia.org/wiki/Kerberos_(protocol)>`_
+secured environments.
+
+
+.. code-block:: scala
+
+  import com.twitter.finagle.{Service, Http}
+  import com.twitter.finagle.http.{Request, Response}
+  import com.twitter.finagle.http.SpnegoAuthenticator.ClientFilter
+  import com.twitter.finagle.http.SpnegoAuthenticator.Credentials.{ClientSource, JAASClientSource}
+
+  val jaas: ClientSource = new JAASClientSource(
+    loginContext = "com.sun.security.jgss.krb5.initiate",
+    _serverPrincipal = "HTTP/SOME_HOST@SOME_DOMAIN"
+  )
+
+  val client: Service[Request, Response] =
+    new ClientFilter(jaas).andThen(Http.client.newService("host:port"))
+
+
 HTTP Proxy
 ~~~~~~~~~~
 
-There is built-in support for `tunneling TCP-based protocols <http://www.web-cache.com/Writings/Internet-Drafts/draft-luotonen-web-proxy-tunneling-01.txt>`_
+There is built-in support for `tunneling TCP-based protocols <https://tools.ietf.org/html/draft-luotonen-web-proxy-tunneling-01>`_
 through web proxy servers in a default Finagle client that might be used with any TCP traffic, not
-only HTTP(S). See `Squid documentation <http://wiki.squid-cache.org/Features/HTTPS>`_ on this feature.
+only HTTP(S). See `Squid documentation <https://wiki.squid-cache.org/Features/HTTPS>`_ on this feature.
 
 The following example enables tunneling HTTP traffic through a web proxy server `my-proxy-server.com`
 to `twitter.com`.
@@ -63,26 +105,32 @@ to `twitter.com`.
   import java.net.SocketAddress
 
   val twitter: Service[Request, Response] = Http.client
-    .configured(Transporter.HttpProxy(Some(new InetSocketAddress("my-proxy-server.com", 3128))))
-    .withSessionQualifier.noFailFast
-    .newService("twitter.com")
+    .withTransport.httpProxyTo(
+      host = "twitter.com:443",
+      credentials = Transporter.Credentials("user", "password")
+    )
+    .newService("inet!my-proxy-server.com:3128") // using local DNS to resolve proxy
 
+While this setup may look somewhat counter intuitive with regards to where the ultimate destination
+and the proxy server address are applied, it enables a variety of resiliency features by utilizing
+Finagle's naming and load balancing subsystems. Given a web proxy server address/name falls under
+a standard name resolution process, it might be (and should be) backed by a replica set (multiple
+hosts) to get the greatest out of a client.
 
 .. note::
 
-  The web proxy server, represented as a static `SocketAddress`, acts as a single point of failure
-  for a client. Whenever a proxy server is down, no traffic is served through the client no matter
-  how big its replica set. This is why :ref:`Fail Fast <client_fail_fast>` is disabled on this
-  client.
-
-  There is better HTTP proxy support coming to Finagle along with the Netty 4 upgrade.
+  There is also a legacy support to web proxy servers available in Finagle via the
+  `Transporter.HttpProxy` stack param. In that case, proxy server is forced to represented as a single
+  `SocketAddress`, which not only introduces a single point of failure within a client (i.e., a
+  client goes offline if a web proxy server is down), but also disables Finagle's resiliency features
+  such as failure detection and load balancing.
 
 SOCKS5 Proxy
 ~~~~~~~~~~~~
 
 SOCKS5 proxy support in Finagle is designed and implemented exclusively for testing/development
 (assuming that SOCKS proxy is provided via `ssh -D`), not for production usage. For production
-traffic, an HTTP proxy should be used instead.
+traffic, an HTTP(S) proxy should be used instead.
 
 Use the following CLI flags to enable SOCKS proxy on every Finagle client on a given JVM instance
 (username and password are optional).
@@ -107,11 +155,13 @@ across multiple endpoints, the `endpoint stack` provides circuit breakers
 and connection pooling, and the `connection stack` provides connection life-cycle
 management and implements the wire protocol.
 
-.. figure:: _static/clientstack.svg
+.. raw:: html
+    :file: _static/clientstack.svg
 
-    Fig. 1: A visual representation of each module in a default Finagle client
-    that is configured with three endpoints and connections. Requests flow from
-    left to right.
+
+Fig. 1: A visual representation of each module in a default Finagle client
+that is configured with three endpoints and connections. Requests flow from
+left to right.
 
 
 Module Composition
@@ -157,14 +207,26 @@ output. To override this, use the following sample.
     .withMonitor(monitor)
     .newService("twitter.com")
 
-Finally, clients have built-in support for `Zipkin <http://zipkin.io/>`_.
+Finally, clients have built-in support for `Zipkin <https://zipkin.io/>`_.
+
+.. _client_retries:
 
 Retries
 ~~~~~~~
 
-Every Finagle client contains a `Retries` module in the top (above load balancers) of its
-stack so it can retry failures from the underlying modules: circuit breakers, timeouts,
-load balancers and connection pools.
+Every Finagle client contains a `Retries` module in the stack, above load balancers,
+so that it can retry failures from the underlying modules: circuit breakers, timeouts,
+load balancers and connection pools. Retries can help improve the client's logical success
+rate when subsequent attempts succeed.
+
+For the most part, service owners will be interested in the logical success rate of a clients.
+Logical requests represent the result of the initial request, after any retries have occurred.
+Concretely, should a request result in a retryable failure on the first attempt, but succeed upon
+retry, this is considered a single successful logical request. By default, a Finagle client's
+success rate metrics include the individual attempts and this can cause confusion.
+:ref:`MethodBuilder <methodbuilder>` offers logical metrics scoped to "logical" for both
+success rate and latency. The deprecated ``ClientBuilder`` code also offers similar metrics
+scoped to "tries".
 
 Failures that are known to be safe to retry (for example, exceptions that occurred before the
 bytes were written to the wire and protocol level NACKs) will be automatically retried by Finagle.
@@ -193,7 +255,7 @@ To override this default use the following code snippet.
 
 .. code-block:: scala
 
-  import com.twitter.conversions.time._
+  import com.twitter.conversions.DurationOps._
   import com.twitter.finagle.Http
   import com.twitter.finagle.service.{Backoff, RetryBudget}
 
@@ -209,12 +271,12 @@ construct a new instance of ``RetryBudget`` backed by *leaky token bucket*.
 
 .. code-block:: scala
 
-  import com.twitter.conversions.time._
+  import com.twitter.conversions.DurationOps._
   import com.twitter.finagle.service.RetryBudget
 
   val budget: RetryBudget = RetryBudget(
     ttl = 10.seconds,
-    minRetriesPerSec = 5
+    minRetriesPerSec = 5,
     percentCanRetry = 0.1
   )
 
@@ -231,7 +293,7 @@ exceptions from the remote server should be applied explicitly.
 
 .. code-block:: scala
 
-  import com.twitter.conversions.time._
+  import com.twitter.conversions.DurationOps._
   import com.twitter.finagle.Http
   import com.twitter.finagle.util.DefaultTimer
   import com.twitter.finagle.service.{RetryBudget, RetryFilter, RetryPolicy}
@@ -244,7 +306,7 @@ exceptions from the remote server should be applied explicitly.
 
   val retry = new RetryFilter(
     retryPolicy = policy,
-    timer = DefaultTimer.twitter,
+    timer = DefaultTimer,
     statsReceiver = NullStatsReceiver,
     retryBudget = budget
   )
@@ -264,7 +326,7 @@ The following example [#example]_ constructs an instance of ``RetryPolicy`` usin
   import com.twitter.finagle.http.{Response, Status}
   import com.twitter.finagle.service.{Backoff, RetryPolicy}
   import com.twitter.util.{Try, Return, Throw}
-  import com.twitter.conversions.time._
+  import com.twitter.conversions.DurationOps._
 
   val policy: RetryPolicy[Try[Response]] =
     RetryPolicy.backoff(Backoff.equalJittered(10.milliseconds, 10.seconds)) {
@@ -294,7 +356,7 @@ stack params [#example]_.
 
 .. code-block:: scala
 
-  import com.twitter.conversions.time._
+  import com.twitter.conversions.DurationOps._
   import com.twitter.finagle.Http
 
   val twitter = Http.client
@@ -308,6 +370,8 @@ time allowed for a request to be outstanding. An important implementation detail
 :src:`TimeoutFilter <com/twitter/finagle/service/TimeoutFilter.scala>` is that it attempts
 to cancel the request when a timeout is triggered. With most protocols, if the request has
 already been dispatched, the only way to cancel the request is to terminate the connection.
+Note that HTTP/2 and Mux both have first-class support for request cancellation without
+needing to tear down the connection.
 
 The default timeout for the `Request Timeout` module is unbounded (i.e., ``Duration.Top``).
 Here is an example [#example]_ of how to override that default.
@@ -316,20 +380,26 @@ Here is an example [#example]_ of how to override that default.
 
 .. code-block:: scala
 
-  import com.twitter.conversions.time._
+  import com.twitter.conversions.DurationOps._
   import com.twitter.finagle.Http
 
   val twitter = Http.client
     .withRequestTimeout(42.seconds)
     .newService("twitter.com")
 
+Regarding :ref:`retries <client_retries>`, the timeout is given to each attempt.
+
+As Finagle does not know whether or not a request is idempotent, request timeouts
+are not retried by default. However this can be configured through a
+:ref:`retry policy <client_retries>`.
+
 See :ref:`Request Latency metrics <metrics_stats_filter>` for more details.
 
-.. note:: Requests timed out by the `Request Timeout` module are not retried by default
-          given it's not known whether or not they were written to the wire.
+.. note:: This module only works with request/response usage and does not
+          support streaming (such as with HTTP).
 
 The `Expiration` module is attached at the connection level and expires a service/session
-after a certain amount of idle time. The module is implemented by
+after a certain amount of time. The module is implemented by
 :src:`ExpiringService <com/twitter/finagle/service/ExpiringService.scala>`.
 
 The default setting for the `Expiration` module is to never expire a session. Here is how
@@ -337,19 +407,15 @@ it can be configured [#example]_.
 
 .. code-block:: scala
 
-  import com.twitter.conversions.time._
+  import com.twitter.conversions.DurationOps._
   import com.twitter.finagle.Http
 
   val twitter = Http.client
     .withSession.maxLifeTime(20.seconds)
-    .withSession.maxIdleTime(10.seconds)
     .newService("twitter.com")
 
-The `Expiration` module takes two parameters:
-
-1. `maxLifeTime` - the maximum duration for which a session is considered alive
-2. `maxIdleTime` - the maximum duration for which a session is allowed to idle
-   (not sending any requests)
+The `Expiration` module for clients takes one parameter: `maxLifeTime` - the maximum duration for
+which a session is considered alive.
 
 See :ref:`Expiration metrics <idle_apoptosis_stats>` for more details.
 
@@ -358,7 +424,7 @@ Finally, timeouts can be enforced outside of these modules on a per-request leve
 
 .. code-block:: scala
 
-  import com.twitter.conversions.time._
+  import com.twitter.conversions.DurationOps._
   import com.twitter.finagle.http.{Request, Response}
   import com.twitter.util.Future
 
@@ -367,8 +433,8 @@ Finally, timeouts can be enforced outside of these modules on a per-request leve
 Request Draining
 ~~~~~~~~~~~~~~~~
 
-The `Drain` module guarantees that the client delays closure until all
-outstanding requests have been completed. It wraps each produced service with
+The `RequestDraining` module guarantees that the client delays closure until all
+outstanding requests have been completed. It wraps each produced `Service` with
 a :src:`RefCountedService <com/twitter/finagle/service/RefcountedService.scala>`.
 
 Load Balancing
@@ -480,7 +546,7 @@ Use ``Balancers.p2cPeakEwma`` to construct an instance of ``LoadBalancerFactory`
 
 .. code-block:: scala
 
-  import com.twitter.conversions.time._
+  import com.twitter.conversions.DurationOps._
   import com.twitter.finagle.loadbalancer.{Balancers, LoadBalancerFactory}
 
   val balancer: LoadBalancerFactory =
@@ -493,6 +559,13 @@ The ``p2cPeakEwma`` factory method takes two arguments:
 
 Aperture + Least Loaded [#experimental]_
 ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+
+.. note::
+
+  The aperture load balancers can be more challenging to reason about than the P2C family of
+  balancers. See :ref:`Aperture Load Balancers <aperture_load_balancers>` section for more
+  information.
+
 All the previously mentioned configurations operate optimally under high load. That is, without
 sufficient concurrent load, the previous distributors can degrade to random selection. The Aperture
 distributor aims to remedy this among other things. By employing a simple feedback controller based
@@ -515,7 +588,7 @@ Use ``Balancers.aperture`` to construct an instance of ``LoadBalancerFactory`` [
 
 .. code-block:: scala
 
-  import com.twitter.conversions.time._
+  import com.twitter.conversions.DurationOps._
   import com.twitter.finagle.loadbalancer.{Balancers, LoadBalancerFactory}
 
   val balancer: LoadBalancerFactory =
@@ -559,11 +632,24 @@ behind a client parameter [#probation]_.
 Behavior when no nodes are available
 ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
 When there are no nodes in the `com.twitter.finagle.Status.Open` state, the balancers
-must make a decision. One approach is to fail the request at this point. Instead,
-Finagle makes an optimistic decision that its view of the nodes may be out-of-date
-and picks a node it hopes has become available.
+must make a decision. Finagle's default behavior makes an optimistic decision
+that its view of the nodes may be out-of-date and picks a node it hopes has become available.
+This can be customized to fail the request immediately through
+``LoadBalancerFactory.WhenNoNodesOpenParam`` which will cause clients to see
+a non-retryable ``c.t.f.loadbalancer.NoNodesOpenException``:
+
+.. code-block:: scala
+
+  import com.twitter.finagle.loadbalancer.LoadBalancerFactory.WhenNoNodesOpenParam
+  import com.twitter.finagle.loadbalancer.WhenNoNodesOpen
+  import com.twitter.finagle.Http
+
+  Http.client
+    .configured(WhenNoNodesOpenParam(WhenNoNodesOpen.FailFast))
 
 :ref:`Related stats <loadbalancer_stats>`
+
+.. _client_circuit_breaking:
 
 Circuit Breaking
 ~~~~~~~~~~~~~~~~
@@ -572,14 +658,14 @@ The following modules aim to preemptively disable sessions that will likely fail
 From the perspective of the load balancer, they act as circuit breakers which, when
 triggered, temporarily suspend the use of a particular endpoint.
 
-There are at least two modules in the client stacks that might be viewed as circuit breakers:
+There are at least two modules in the client stacks that might be viewed as `circuit breakers <https://martinfowler.com/bliki/CircuitBreaker.html>`_:
 
 1. `Fail Fast` - a session-driven circuit breaker
-2. `Failure Accrual` - a `request-driven circuit breaker <http://martinfowler.com/bliki/CircuitBreaker.html>`_
+2. `Failure Accrual` - a request-driven circuit breaker
 
-In addition to `Fail Fast` and `Failure Accrual`, some of the protocols (i.e., `Mux`) in
+In addition to `Fail Fast` and `Failure Accrual`, some of the protocols (i.e., `Mux`, `HTTP/2`) in
 Finagle support `Ping-based Failure Detectors` [#failure_detectors]_
-(i.e., :finagle-mux-src:`ThresholdFailureDetector <com/twitter/finagle/mux/ThresholdFailureDetector.scala>`).
+(i.e., :src:`ThresholdFailureDetector <com/twitter/finagle/liveness/ThresholdFailureDetector.scala>`).
 
 .. _client_fail_fast:
 
@@ -594,8 +680,9 @@ During the time that a host is marked down, the factory is marked unavailable (a
 the load balancer above it will avoid its use). The factory becomes available
 again on success or when the back-off schedule runs out.
 
-See the FAQ to :ref:`better understand <faq_failedfastexception>` why clients
-might be seeing ``com.twitter.finagle.FailedFastException``'s.
+This module fails closed and returns an exception when it detects a failure. See the
+FAQ to :ref:`better understand <faq_failedfastexception>` why clients might be
+seeing ``com.twitter.finagle.FailedFastException``'s.
 
 .. _disabling_fail_fast:
 
@@ -613,8 +700,9 @@ particular client.
 
 .. note::
 
-  It's important to disable `Fail Fast` when only have one host in the replica set because
-  Finagle doesn't have any other path to choose.
+  Because this module fails closed, it is advised to disable `Fail Fast` when only one host
+  is present in the replica set. For example, when configuring your client to communicate to
+  a VIP or any other destination which resolves to a single entity.
 
 :ref:`Related stats <fail_fast_stats>`
 
@@ -623,18 +711,17 @@ particular client.
 Failure Accrual
 ^^^^^^^^^^^^^^^
 
-The `Failure Accrual` module marks itself as unavailable based on the number of observed
-failures. The module remains unavailable for a predefined duration. Recall
-that the availability is propagated through the stack. Thus the load balancer
-will avoid using an endpoint where the failure accrual module is unavailable.
-The module is implemented by :src:`FailureAccrualFactory <com/twitter/finagle/service/FailureAccrualFactory.scala>`.
+The `Failure Accrual` module marks itself as unavailable per-endpoint based on a configurable :src:`policy <com/twitter/finagle/liveness/FailureAccrualPolicy.scala>`.
+Unlike `Fail Fast`, this module fails open. That is, even if it transitions into an unavailable state, requests
+will still be allowed to flow through it. However, recall that the availability is propagated through the stack,
+so the load balancer will avoid using an endpoint where the failure accrual module is unavailable.
 
-See :ref:`Failure Accrual Stats <failure_accrual_stats>` for stats exported from the
-``Failure Accrual`` module.
+When transitioning from an unavailable to an available state, the module is conservative and only
+allows for a probe request. If the probe fails, it goes back to unavailable regardless of the policy.
+Put differently, at least one request must succeed before the module starts to apply the policy
+again.
 
-The ``FailureAccrualFactory`` is configurable in terms of used policy to determine whether to mark
-an endpoint dead upon a request failure. At this point, there are two setups available out of
-the box.
+There are two available policies out of the box:
 
 1. A policy based on the requests success rate meaning (i.e, an endpoint marked dead if its success rate
    goes bellow the given threshold)
@@ -650,10 +737,10 @@ success rate [#example]_.
 
 .. code-block:: scala
 
-  import com.twitter.conversions.time._
+  import com.twitter.conversions.DurationOps._
   import com.twitter.finagle.Http
-  import com.twitter.finagle.service.{Backoff, FailureAccrualFactory}
-  import com.twitter.finagle.service.exp.FailureAccrualPolicy
+  import com.twitter.finagle.liveness.{FailureAccrualFactory, FailureAccrualPolicy}
+  import com.twitter.finagle.service.Backoff
 
   val twitter = Http.client
     .configured(FailureAccrualFactory.Param(() => FailureAccrualPolicy.successRate(
@@ -675,11 +762,10 @@ following snippet [#example]_.
 
 .. code-block:: scala
 
-  import com.twitter.conversions.time._
+  import com.twitter.conversions.DurationOps._
   import com.twitter.finagle.Http
-  import com.twitter.finagle.service.{Backoff, FailureAccrualFactory}
-  import com.twitter.finagle.service.exp.FailureAccrualPolicy
-
+  import com.twitter.finagle.liveness.{FailureAccrualFactory, FailureAccrualPolicy}
+  import com.twitter.finagle.service.Backoff
 
   val twitter = Http.client
     .configured(FailureAccrual.Param(() => FailureAccrualPolicy.consecutiveFailures(
@@ -710,6 +796,10 @@ client.
     .withSessionQualifier.noFailureAccrual
     .newService("twitter.com")
 
+The module is implemented by :src:`FailureAccrualFactory <com/twitter/finagle/liveness/FailureAccrualFactory.scala>`.
+See :ref:`Failure Accrual Stats <failure_accrual_stats>` for stats exported from the
+``Failure Accrual`` module.
+
 Pooling
 ~~~~~~~
 
@@ -720,10 +810,15 @@ resources open.
 Depending on the configuration, a Finagle client's stack might contain up to _three_ connection pools
 stacked on each other: watermark, caching and buffering pools.
 
-The only Finagle protocol that doesn't require any connection pooling (a multiplexing protocol) is
-`Mux` so it uses :src:`SingletonPool <com/twitter/finagle/pool/SingletonPool.scala>` that maintains
-a single connection per endpoint. For every other Finagle-supported protocol (i.e., HTTP/1.1, Thrift),
-there a connection pooling setup built with watermark and caching pools.
+The two Finagle protocols that don't require any connection pooling (multiplexing protocols) are
+Mux and HTTP/2 as they both maintain just one connection per remote peer. For every other Finagle-
+supported protocol (i.e., HTTP/1.1, Thrift), there a connection pooling setup built with watermark
+and caching pools in front of each remote peer.
+
+.. note::
+
+  When HTTP/2 is enabled on an HTTP client (and the transport is successfully upgraded), the session
+  pool caches streams (not connections) multiplexed over a single connection.
 
 The default client stack layers caching and watermark pools which amounts to maintaining the low
 watermark (i.e., ``0``, as long as request concurrency exists), queuing requests above the unbounded high
@@ -735,21 +830,28 @@ example [#example]_.
 
 .. code-block:: scala
 
-  import com.twitter.conversions.time._
+  import com.twitter.conversions.DurationOps._
   import com.twitter.finagle.Http
 
   val twitter = Http.client
     .withSessionPool.minSize(10)
     .withSessionPool.maxSize(20)
     .withSessionPool.maxWaiters(100)
+    .withSessionPool.ttl(5.seconds)
     .newService("twitter.com")
+
+.. note::
+
+  All session pool settings are applied to each host in the replica set. Put this way, these settings
+  are per-host as opposed to per-client.
 
 Thus all the three pools are configured with a single param that takes the following arguments:
 
 1. `minSize` and `maxSize` - low and high watermarks for the watermark pool (note that a Finagle
-   client will not maintain more connections than `maxSize`)
-2. `maxWaiters` - the maximum number of connection requests that are queued when the connection
-   concurrency exceeds the high watermark
+   client will not maintain more connections than `maxSize` per host)
+2. `maxWaiters` - the maximum number of connection requests that are queued per host when the
+   connection concurrency exceeds the high watermark
+3. `ttl`- the maximum amount of time a per-host session is allowed to be cached in a pool
 
 :ref:`Related stats <pool_stats>`
 
@@ -788,12 +890,73 @@ and then slowly decays, based on the TTL.
 
 :ref:`Related stats <pool_stats>`
 
+Admission Control
+-----------------
+
+Clients are configured with the :src:`NackAdmissionFilter <com/twitter/finagle/filter/NackAdmissionFilter.scala>`
+which will probabilistically drop some requests to unhealthy clusters. This aims
+to decrease the request volume to those clusters with little to no effect on a
+client's already unhealthy success rate. The filter works by keeping a moving
+average of the fraction of requests that are :ref:`nacked <glossary_nack>`. When
+this fraction hits a given threshold, the filter will probabilistically drop
+requests in proportion to that fraction.
+The filter can be configured with the following parameters:
+
+1. ``window`` The duration over which the average is calculated. Default is 2
+   minutes.
+2. ``nackRateThreshold`` The rate of rejected requests at which the filter kicks
+   in. Default is 0.5.
+
+:ref:`Related stats <admission_control_stats>`
+
+Here is a brief summary of the configurable params.
+
+    A configuration with a ``nackRateThreshold`` of N% and a ``window`` of duration
+    W roughly translates as, "start dropping some requests to the cluster when
+    the nack rate averages at least N% over a window of duration W."
+
+Here are some examples of situations with param values chosen to make the
+filter useful:
+
+- Owners of Service A examine their service's nack rate over several days
+  and find that it is almost always under 10% and rarely above 1% (e.g.,
+  during traffic spikes) or 5% (e.g., during a data center outage). They
+  do not want to preemptively drop requests unless the cluster sees an
+  extreme overload situation so they choose a nack rate threshold of 20%.
+  And in such a situation they want the filter to act relatively quickly,
+  so they choose a window of 30 seconds.
+
+- Owners of Service B observe that excess load typically causes peak nack
+  rates of around 25% for up to 60 seconds. They want to be aggressive
+  about avoiding cluster overload and don’t mind dropping some innocent
+  requests during mild load so they choose a window of 10 seconds and a
+  threshold of 0.15 (= 15%).
+
+.. _response_classification:
+
 .. include:: shared-modules/ResponseClassification.rst
+
+MethodBuilder
+-------------
+
+.. note:: Currently there is ``MethodBuilder`` support for HTTP and ThriftMux.
+          We are waiting on user interest before expanding to more protocols.
+
+``MethodBuilder`` is a collection of APIs for client configuration at a higher
+level than the  :ref:`Finagle 6 APIs <finagle6apis>` while improving upon the deprecated
+``ClientBuilder``. ``MethodBuilder`` provides:
+
+- :ref:`Logical <mb_logical_req>` success rate metrics.
+- Retries based on application-level requests and responses (e.g. an HTTP
+  503 response code or a Thrift exception).
+- Configuration of per-attempt and total timeouts.
+
+:doc:`Learn more <MethodBuilder>` about ``MethodBuilder``.
 
 .. rubric:: Footnotes
 
 .. [#backoff] Most of the backoff strategies implemented in Finagle are inspired by Mark
-   Brooker's `blog post <http://www.awsarchitectureblog.com/2015/03/backoff.html>`_.
+   Brooker's `blog post <https://www.awsarchitectureblog.com/2015/03/backoff.html>`_.
 
 .. [#experimental] This configuration was developed to target specific problems we encounter
    at Twitter and should be considered experimental. Note that its API may change as we continue
@@ -831,4 +994,4 @@ and then slowly decays, based on the TTL.
 .. [#probation] See ``com.twitter.finagle.loadbalancer.LoadBalancerFactory#EnableProbation``.
 
 .. [#failure_detectors] See `Failure Detectors` section from
-   Alvaro Videla's `blog post <http://videlalvaro.github.io/2015/12/learning-about-distributed-systems.html>`_.
+   Alvaro Videla's `blog post <https://videlalvaro.github.io/2015/12/learning-about-distributed-systems.html>`_.

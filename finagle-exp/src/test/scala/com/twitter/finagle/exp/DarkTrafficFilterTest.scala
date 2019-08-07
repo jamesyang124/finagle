@@ -10,7 +10,7 @@ import org.mockito.Matchers._
 import org.mockito.Mockito._
 import org.scalatest.FunSuite
 import org.scalatest.junit.JUnitRunner
-import org.scalatest.mock.MockitoSugar
+import org.scalatest.mockito.MockitoSugar
 
 @RunWith(classOf[JUnitRunner])
 class DarkTrafficFilterTest extends FunSuite with MockitoSugar {
@@ -35,8 +35,8 @@ class DarkTrafficFilterTest extends FunSuite with MockitoSugar {
     val filter = new DarkTrafficFilter(darkService, enableSampling, statsReceiver)
 
     val forwarded = Seq("dark_traffic_filter", "forwarded")
-    val skipped   = Seq("dark_traffic_filter", "skipped")
-    val failed    = Seq("dark_traffic_filter", "failed")
+    val skipped = Seq("dark_traffic_filter", "skipped")
+    val failed = Seq("dark_traffic_filter", "failed")
 
     val service = mock[Service[String, String]]
     when(service.apply(anyObject())) thenReturn Future.value(response)
@@ -48,9 +48,9 @@ class DarkTrafficFilterTest extends FunSuite with MockitoSugar {
       assert(Await.result(filter(request, service)) == response)
 
       verify(service).apply(request)
-      assert(statsReceiver.counters.get(Seq("test_applyCounts")) == None)
+      assert(statsReceiver.counters.get(Seq("test_applyCounts")) == Some(0))
 
-      assert(statsReceiver.counters.get(forwarded) == None)
+      assert(statsReceiver.counters.get(forwarded) == Some(0))
       assert(statsReceiver.counters.get(skipped) == Some(1))
     }
   }
@@ -84,14 +84,17 @@ class DarkTrafficFilterTest extends FunSuite with MockitoSugar {
     val lightServiceCancelled = new AtomicBoolean(false)
     val darkServiceCancelled = new AtomicBoolean(false)
 
-
     val lightPromise = new Promise[String]
     lightPromise.setInterruptHandler { case t: Throwable => lightServiceCancelled.set(true) }
     val darkPromise = new Promise[String]
     darkPromise.setInterruptHandler { case t: Throwable => darkServiceCancelled.set(true) }
 
-    val service = Service.mk { s: String => lightPromise }
-    val darkService = Service.mk { s: String =>  darkPromise }
+    val service = Service.mk { s: String =>
+      lightPromise
+    }
+    val darkService = Service.mk { s: String =>
+      darkPromise
+    }
 
     val filter = new DarkTrafficFilter(darkService, Function.const(true), NullStatsReceiver)
     val chainedService = filter.andThen(service)

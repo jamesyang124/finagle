@@ -1,7 +1,6 @@
 package com.twitter.finagle.memcached.unit
 
-import com.google.common.hash.Hashing
-import com.twitter.conversions.time._
+import com.twitter.conversions.DurationOps._
 import com.twitter.finagle.memcached.protocol._
 import com.twitter.finagle.memcached.util.AtomicMap
 import com.twitter.finagle.memcached.{Entry, Interpreter}
@@ -42,12 +41,12 @@ class InterpreterTest extends FunSuite {
       .casUnique
     assert(interpreter(Gets(Seq(key))) == Values(Seq(Value(key, value1, hashValue1))))
 
-    assert(interpreter(Cas(key, 0, Time.epoch, value2, hashValue1.get)) == Stored())
-    assert(interpreter(Cas(key, 0, Time.epoch, value3, hashValue1.get)) == NotStored())
+    assert(interpreter(Cas(key, 0, Time.epoch, value2, hashValue1.get)) == Stored)
+    assert(interpreter(Cas(key, 0, Time.epoch, value3, hashValue1.get)) == NotStored)
   }
 
   test("correctly perform the QUIT command") {
-    assert(interpreter(Quit()) == NoOp())
+    assert(interpreter(Quit()) == NoOp)
   }
 
   test("correctly perform the EXPIRY command") {

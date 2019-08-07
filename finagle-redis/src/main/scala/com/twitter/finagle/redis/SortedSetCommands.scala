@@ -2,7 +2,7 @@ package com.twitter.finagle.redis
 
 import java.lang.{Boolean => JBoolean, Double => JDouble, Long => JLong}
 import com.twitter.finagle.redis.protocol._
-import com.twitter.finagle.redis.util.{BufToString, NumberFormat, ReplyFormat}
+import com.twitter.finagle.redis.util.{BufToString, ReplyFormat}
 import com.twitter.io.Buf
 import com.twitter.util.Future
 
@@ -20,7 +20,8 @@ private[redis] trait SortedSetCommands { self: BaseClient =>
 
   private[this] def withScoresHelper(
     withScores: JBoolean
-  )(messages: List[Reply]): Either[ZRangeResults, Seq[Buf]] = {
+  )(messages: List[Reply]
+  ): Either[ZRangeResults, Seq[Buf]] = {
     val chanBufs = ReplyFormat.toBuf(messages)
     if (withScores)
       Left(ZRangeResults(returnPairs(chanBufs)))
@@ -45,10 +46,13 @@ private[redis] trait SortedSetCommands { self: BaseClient =>
    * @return The number of elements added to sorted set.
    */
   def zAddMulti(key: Buf, members: Seq[(JDouble, Buf)]): Future[JLong] = {
-    doRequest(ZAdd(key, members.map { m => ZMember(m._1, m._2) })) {
+    doRequest(ZAdd(key, members.map { m =>
+      ZMember(m._1, m._2)
+    })) {
       case IntegerReply(n) => Future.value(n)
     }
   }
+
   /**
    * Returns cardinality of the sorted set under the `key`, or 0
    * if `key` does not exist.
@@ -80,7 +84,7 @@ private[redis] trait SortedSetCommands { self: BaseClient =>
   ): Future[Either[ZRangeResults, Seq[Buf]]] =
     doRequest(
       ZRangeByScore(key, min, max, if (withScores) Some(WithScores) else None, limit)
-    ) (parseMBulkReply(withScores))
+    )(parseMBulkReply(withScores))
 
   /**
    * Removes specified `members` from sorted set at `key`.
@@ -126,9 +130,9 @@ private[redis] trait SortedSetCommands { self: BaseClient =>
    */
   def zScore(key: Buf, member: Buf): Future[Option[JDouble]] =
     doRequest(ZScore(key, member)) {
-      case BulkReply(message)   =>
-        Future.value(Some(NumberFormat.toDouble(BufToString(message))))
-      case EmptyBulkReply       => Future.None
+      case BulkReply(message) =>
+        Future.value(Some(BufToString(message).toDouble))
+      case EmptyBulkReply => Future.None
     }
 
   /**
@@ -138,7 +142,7 @@ private[redis] trait SortedSetCommands { self: BaseClient =>
   def zRevRank(key: Buf, member: Buf): Future[Option[JLong]] =
     doRequest(ZRevRank(key, member)) {
       case IntegerReply(n) => Future.value(Some(n))
-      case EmptyBulkReply  => Future.None
+      case EmptyBulkReply => Future.None
     }
 
   /**
@@ -150,8 +154,8 @@ private[redis] trait SortedSetCommands { self: BaseClient =>
   def zIncrBy(key: Buf, amount: JDouble, member: Buf): Future[Option[JDouble]] =
     doRequest(ZIncrBy(key, amount, member)) {
       case BulkReply(message) =>
-        Future.value(Some(NumberFormat.toDouble(BufToString(message))))
-      case EmptyBulkReply     => Future.None
+        Future.value(Some(BufToString(message).toDouble))
+      case EmptyBulkReply => Future.None
     }
 
   /**
@@ -161,7 +165,7 @@ private[redis] trait SortedSetCommands { self: BaseClient =>
   def zRank(key: Buf, member: Buf): Future[Option[JLong]] =
     doRequest(ZRank(key, member)) {
       case IntegerReply(n) => Future.value(Some(n))
-      case EmptyBulkReply  => Future.None
+      case EmptyBulkReply => Future.None
     }
 
   /**
@@ -199,5 +203,32 @@ private[redis] trait SortedSetCommands { self: BaseClient =>
   ): Future[Either[ZRangeResults, Seq[Buf]]] =
     doRequest(ZRange(key, start, stop, if (withScores) Some(WithScores) else None)) {
       parseMBulkReply(withScores)
+    }
+
+  /**
+   * Returns keys in given set `key`, starting at `cursor`.
+   */
+  def zScan(key: Buf, cursor: JLong, count: Option[JLong], pattern: Option[Buf]): Future[Seq[Buf]] =
+    doRequest(ZScan(key, cursor, count, pattern)) {
+      case MBulkReply(messages) => Future.value(ReplyFormat.toBuf(messages))
+      case EmptyMBulkReply => Future.Nil
+    }
+
+  /**
+   * Removes and returns up to `count` members with the lowest scores
+   * in the sorted set stored at `key`.
+   */
+  def zPopMin(key: Buf, count: Option[JLong]): Future[Either[ZRangeResults, Seq[Buf]]] =
+    doRequest(ZPopMin(key, count)) {
+      parseMBulkReply(JBoolean.TRUE)
+    }
+
+  /**
+   * Removes and returns up to `count` members with the highest scores
+   * in the sorted set stored at `key`.
+   */
+  def zPopMax(key: Buf, count: Option[JLong]): Future[Either[ZRangeResults, Seq[Buf]]] =
+    doRequest(ZPopMax(key, count)) {
+      parseMBulkReply(JBoolean.TRUE)
     }
 }

@@ -1,19 +1,27 @@
 package com.twitter.finagle
 
 import com.twitter.concurrent.Once
+import com.twitter.conversions.DurationOps._
 import com.twitter.finagle.exp.FinagleScheduler
-import com.twitter.finagle.stats.FinagleStatsReceiver
-import com.twitter.finagle.util.DefaultLogger
-import com.twitter.util.{FuturePool, NonFatal}
-import java.util.Properties
+import com.twitter.finagle.loadbalancer.aperture
+import com.twitter.finagle.loadbalancer.aperture.ProcessCoordinate.FromInstanceId
+import com.twitter.finagle.stats.{DefaultStatsReceiver, FinagleStatsReceiver}
+import com.twitter.finagle.server.{ServerInfo, StackServer}
+import com.twitter.finagle.util.{DefaultLogger, DefaultTimer, LoadService}
+import com.twitter.jvm.JvmStats
+import com.twitter.util.{FuturePool, Promise}
 import java.util.concurrent.atomic.AtomicReference
 import java.util.logging.Level
+import java.util.Properties
+import scala.util.control.NonFatal
 
 /**
  * Global initialization of Finagle.
  */
 private[twitter] object Init {
   private val log = DefaultLogger
+
+  private val useLocalInInterruptible = CoreToggles("com.twitter.util.UseLocalInInterruptible")
 
   // Used to record Finagle versioning in trace info.
   private val unknownVersion = "?"
@@ -24,13 +32,30 @@ private[twitter] object Init {
     // because unboundedPool and interruptibleUnboundedPool share a common
     // `ExecutorService`, these metrics apply to both of the FuturePools.
     val pool = FuturePool.unboundedPool
-    val stats = FinagleStatsReceiver.scope("future_pool")
+    val fpoolStats = FinagleStatsReceiver.scope("future_pool")
+    val apertureStats = FinagleStatsReceiver.scope("aperture")
     Seq(
-      stats.addGauge("pool_size") { pool.poolSize },
-      stats.addGauge("active_tasks") { pool.numActiveTasks },
-      stats.addGauge("completed_tasks") { pool.numCompletedTasks }
+      fpoolStats.addGauge("pool_size") { pool.poolSize },
+      fpoolStats.addGauge("active_tasks") { pool.numActiveTasks },
+      fpoolStats.addGauge("completed_tasks") { pool.numCompletedTasks },
+      apertureStats.addGauge("coordinate") {
+        aperture.ProcessCoordinate() match {
+          case Some(coord) => coord.offset.toFloat
+          // We know the coordinate's range is [0, 1.0), so anything outside
+          // of this can be used to signify empty.
+          case None => -1f
+        }
+      },
+      apertureStats.addGauge("peerset_size") {
+        aperture.ProcessCoordinate() match {
+          case Some(FromInstanceId(_, size)) => size.toFloat
+          case _ => -1f
+        }
+      }
     )
   }
+
+  JvmStats.register(DefaultStatsReceiver)
 
   def finagleVersion: String = _finagleVersion.get
 
@@ -54,8 +79,7 @@ private[twitter] object Init {
       }
     } catch {
       case NonFatal(exc) =>
-        log.log(
-          Level.WARNING, s"Exception while loading Finagle's build.properties: $path", exc)
+        log.log(Level.WARNING, s"Exception while loading Finagle's build.properties: $path", exc)
         None
     }
   }
@@ -67,23 +91,45 @@ private[twitter] object Init {
       "finagle-core_2.11",
       "finagle-core_2.12"
     )
-    candidates.flatMap { c => tryProps(s"/com/twitter/$c/build.properties") }
-      .headOption
+    candidates.flatMap { c =>
+      tryProps(s"/com/twitter/$c/build.properties")
+    }.headOption
   }
 
   private[this] val once = Once {
+    LoadService[FinagleInit]().foreach { init =>
+      try {
+        init()
+      } catch {
+        case NonFatal(nf) =>
+          log.log(Level.WARNING, s"error running ${init.label}", nf)
+      }
+    }
+
     FinagleScheduler.init()
+
+    // Use state at time of callback creation in Interruptible
+    // Evaluate toggle every minute so we can change the behavior at runtime.
+    DefaultTimer.schedule(1.minute) {
+      Promise.useLocalInInterruptible(useLocalInInterruptible(ServerInfo().id.hashCode()))
+    }
 
     val p = loadBuildProperties.getOrElse { new Properties() }
 
     _finagleVersion.set(p.getProperty("version", unknownVersion))
     _finagleBuildRevision.set(p.getProperty("build_revision", unknownVersion))
 
-    log.info("Finagle version %s (rev=%s) built at %s".format(
-      finagleVersion,
-      finagleBuildRevision,
-      p.getProperty("build_name", "?")
-    ))
+    LoadService[StackTransformer]().foreach { nt =>
+      StackServer.DefaultTransformer.append(nt)
+    }
+
+    log.info(
+      "Finagle version %s (rev=%s) built at %s".format(
+        finagleVersion,
+        finagleBuildRevision,
+        p.getProperty("build_name", "?")
+      )
+    )
   }
 
   /**

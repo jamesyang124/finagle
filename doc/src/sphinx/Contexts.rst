@@ -19,8 +19,8 @@ is available within ``Timer`` functions:
 
 .. code-block:: scala
 
-  scala> import com.twitter.conversions.time._, com.twitter.finagle.thrift.ClientId, com.twitter.finagle.util.HashedWheelTimer, com.twitter.util.{Await, Future}
-  import com.twitter.conversions.time._
+  scala> import com.twitter.conversions.DurationOps._, com.twitter.finagle.thrift.ClientId, com.twitter.finagle.util.HashedWheelTimer, com.twitter.util.{Await, Future}
+  import com.twitter.conversions.DurationOps._
   import com.twitter.finagle.thrift.ClientId
   import com.twitter.finagle.util.HashedWheelTimer
   import com.twitter.util.{Await, Future}
@@ -72,6 +72,13 @@ Current request deadline
 ``com.twitter.finagle.context.Deadline.current`` —
 A broadcast ``Context`` that represents when the request should be completed by.
 
+Current retry attempt
+~~~~~~~~~~~~~~~~~~~~~
+
+``com.twitter.finagle.context.Retries.current`` —
+A broadcast ``Context`` that represents which retry attempt this request is.
+Will have ``attempt`` set to 0 if the request is not a retry.
+
 Current TLS peer certificate
 ~~~~~~~~~~~~~~~~~~~~~~~~~~~~
 
@@ -84,6 +91,12 @@ Upstream Address
 ``com.twitter.finagle.context.RemoteInfo.Upstream.addr`` —
 A local ``Context`` that represents the upstream (ingress)
 ``java.net.SocketAddress`` of the current request.
+
+Backup request indicator
+~~~~~~~~~~~~~~~~~~~~~~~~
+``com.twitter.finagle.context.BackupRequest.wasInitiated`` —
+A broadcast ``Context`` that indicates if the request was initiated by a backup
+request.
 
 Creating new Contexts
 ---------------------

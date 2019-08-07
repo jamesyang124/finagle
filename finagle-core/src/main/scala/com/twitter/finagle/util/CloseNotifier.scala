@@ -6,7 +6,7 @@ import com.twitter.util.{Closable, Future, Promise, Return, Time}
  * Allows resources to register their handlers to be invoked when service is closing.
  */
 trait CloseNotifier {
-  def onClose(h: => Unit)
+  def onClose(h: => Unit): Unit
 }
 
 object CloseNotifier {
@@ -26,13 +26,17 @@ object CloseNotifier {
       if (closing.isDefined)
         h
       else
-        closeHandlers ::= { () => h }
+        closeHandlers ::= { () =>
+          h
+        }
     }
 
-     // Invokes close handlers in reverse order from which they were added.
-    closing ensure { closeHandlers foreach { handler =>
-      handler()
-    }}
+    // Invokes close handlers in reverse order from which they were added.
+    closing ensure {
+      closeHandlers foreach { handler =>
+        handler()
+      }
+    }
   }
 
   def makeLifoCloser(): CloseNotifier with Closable = new CloseNotifier with Closable {

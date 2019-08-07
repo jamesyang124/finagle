@@ -7,11 +7,11 @@ import com.twitter.util.Duration
 import java.util.concurrent.atomic.AtomicReference
 
 /**
- * Latency compensation enables the modification of connection and
- * request timeouts on a per-endpoint basis.  For instance, if a
- * client has both network-local and trans-continental endpoints, a
- * reasonable latency compensator might add the speed-of-light penalty
- * when communicating with distant endpoints.
+ * Latency compensation enables the modification of connection, request, and
+ * session acquisition timeouts on a per-endpoint basis.  For instance, if a client
+ * has both network-local and trans-continental endpoints, a reasonable latency
+ * compensator might add the speed-of-light penalty when communicating with distant
+ * endpoints.
  */
 object LatencyCompensation {
 
@@ -72,7 +72,6 @@ object LatencyCompensation {
       Stack.Param(Compensation(Duration.Zero))
   }
 
-
   def module[Req, Rep]: Stackable[ServiceFactory[Req, Rep]] =
     new Stack.Module[ServiceFactory[Req, Rep]] {
       val role = Role
@@ -94,7 +93,7 @@ object LatencyCompensation {
         val AddrMetadata(metadata) = prms[AddrMetadata]
         val compensation = compensator(metadata)
         val compensated = next.make(prms + Compensation(compensation))
-        Stack.Leaf(this, compensated)
+        Stack.leaf(this, compensated)
       }
     }
 

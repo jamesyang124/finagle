@@ -4,11 +4,9 @@ package com.twitter.finagle.zipkin.core
  * The `Span` is the core datastructure in RPC tracing. It denotes the
  * issuance and handling of a single RPC request.
  */
-
-
 import com.twitter.finagle.thrift.thrift
 import com.twitter.finagle.tracing.TraceId
-
+import com.twitter.util.Time
 
 /**
  * The span itself is an immutable datastructure. Mutations are done
@@ -21,15 +19,36 @@ import com.twitter.finagle.tracing.TraceId
  * @param annotations  A sequence of annotations made in this span
  * @param bAnnotations Key-Value annotations, used to attach non timestamped data
  * @param endpoint     This is the local endpoint the span was created on.
+ * @param created      Optional span creation time.
  */
 case class Span(
-  traceId      : TraceId,
-  _serviceName : Option[String],
-  _name        : Option[String],
-  annotations  : Seq[ZipkinAnnotation],
-  bAnnotations : Seq[BinaryAnnotation],
-  endpoint     : Endpoint)
-{
+  traceId: TraceId,
+  _serviceName: Option[String],
+  _name: Option[String],
+  annotations: Seq[ZipkinAnnotation],
+  bAnnotations: Seq[BinaryAnnotation],
+  endpoint: Endpoint,
+  created: Time) {
+
+  def this(
+    traceId: TraceId,
+    _serviceName: Option[String],
+    _name: Option[String],
+    annotations: Seq[ZipkinAnnotation],
+    bAnnotations: Seq[BinaryAnnotation],
+    endpoint: Endpoint
+  ) = this(traceId, _serviceName, _name, annotations, bAnnotations, endpoint, created = Time.now)
+
+  // If necessary, we compute the timestamp of when the span was created
+  // which we serialize and send to the collector.
+  private[this] lazy val timestamp: Time = {
+    // If we have annotations which were created before
+    // the span, we synthesize the span creation time
+    // to match since it's illogical for the span to be
+    // created before annotations.
+    (created +: annotations.map(_.timestamp)).min
+  }
+
   val serviceName = _serviceName getOrElse "Unknown"
   val name = _name getOrElse "Unknown"
 
@@ -48,6 +67,8 @@ case class Span(
 
   def toThrift: thrift.Span = {
     val span = new thrift.Span
+
+    span.setTimestamp(timestamp.inMicroseconds)
 
     span.setId(traceId.spanId.toLong)
     traceId._parentId match {
@@ -80,5 +101,16 @@ case class Span(
 }
 
 object Span {
-  def apply(traceId: TraceId): Span = Span(traceId, None, None, Nil, Nil, Endpoint.Unknown)
+  def apply(traceId: TraceId): Span =
+    Span(traceId, None, None, Nil, Nil, Endpoint.Unknown, Time.now)
+
+  def apply(
+    traceId: TraceId,
+    _serviceName: Option[String],
+    _name: Option[String],
+    annotations: Seq[ZipkinAnnotation],
+    bAnnotations: Seq[BinaryAnnotation],
+    endpoint: Endpoint
+  ): Span =
+    Span(traceId, _serviceName, _name, annotations, bAnnotations, endpoint, Time.now)
 }

@@ -4,7 +4,7 @@ import com.twitter.io.Buf
 
 trait KeyCommand extends Command {
   def key: Buf
-  protected def validate() {
+  protected def validate(): Unit = {
     RequireClientProtocol(key != null && key.length > 0, "Empty Key found")
   }
 
@@ -16,7 +16,7 @@ trait StrictKeyCommand extends KeyCommand {
 
 trait KeysCommand extends Command {
   def keys: Seq[Buf]
-  protected def validate() {
+  protected def validate(): Unit = {
     RequireClientProtocol(keys != null && keys.nonEmpty, "Empty KeySet found")
     keys.foreach { key =>
       RequireClientProtocol(key != null && key.length > 0, "Empty key found")
@@ -33,16 +33,21 @@ trait ValueCommand extends Command {
   def value: Buf
 }
 trait StrictValueCommand extends ValueCommand {
-  RequireClientProtocol(value != null && value.length > 0,
-    "Found unexpected empty value")
+  RequireClientProtocol(value != null && value.length > 0, "Found unexpected empty value")
 }
 
 trait MemberCommand extends Command {
   def member: Buf
 }
 trait StrictMemberCommand extends MemberCommand {
-  RequireClientProtocol(member != null && member.length > 0,
-    "Found unexpected empty set member")
+  RequireClientProtocol(member != null && member.length > 0, "Found unexpected empty set member")
+}
+
+trait MoveCommand extends Command {
+  def source: Buf
+  def destination: Buf
+
+  override def body: Seq[Buf] = Seq(source, destination)
 }
 
 // Command that takes a script as a parameter, i.e. EVAL, SCRIPT LOAD

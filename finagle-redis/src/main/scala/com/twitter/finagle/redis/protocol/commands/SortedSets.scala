@@ -3,6 +3,7 @@ package com.twitter.finagle.redis.protocol
 import com.twitter.finagle.redis.ClientError
 import com.twitter.finagle.redis.util._
 import com.twitter.io.Buf
+import java.lang.{Long => JLong}
 
 case class ZAdd(key: Buf, members: Seq[ZMember]) extends StrictKeyCommand {
   RequireClientProtocol(members.nonEmpty, "Members set must not be empty")
@@ -14,10 +15,13 @@ case class ZAdd(key: Buf, members: Seq[ZMember]) extends StrictKeyCommand {
   def name: Buf = Command.ZADD
   override def body: Seq[Buf] = {
     val membersWithScores =
-      members.flatMap(member => Seq(
-        Buf.Utf8(member.score.toString),
-        member.member
-      ))
+      members.flatMap(
+        member =>
+          Seq(
+            Buf.Utf8(member.score.toString),
+            member.member
+        )
+      )
 
     key +: membersWithScores
   }
@@ -33,19 +37,20 @@ case class ZCount(key: Buf, min: ZInterval, max: ZInterval) extends StrictKeyCom
 }
 
 case class ZIncrBy(key: Buf, amount: Double, member: Buf)
-  extends StrictKeyCommand
-  with StrictMemberCommand {
+    extends StrictKeyCommand
+    with StrictMemberCommand {
 
   def name: Buf = Command.ZINCRBY
   override def body: Seq[Buf] = Seq(key, Buf.Utf8(amount.toString), member)
 }
 
 case class ZInterStore(
-    destination: Buf,
-    numkeys: Int,
-    keys: Seq[Buf],
-    weights: Option[Weights] = None,
-    aggregate: Option[Aggregate] = None) extends ZStore {
+  destination: Buf,
+  numkeys: Int,
+  keys: Seq[Buf],
+  weights: Option[Weights] = None,
+  aggregate: Option[Aggregate] = None)
+    extends ZStore {
 
   validate()
 
@@ -53,23 +58,23 @@ case class ZInterStore(
 }
 
 object ZInterStore {
-  def apply(
-    destination: Buf, keysBuf: Seq[Buf], weights: Weights
-  ): ZInterStore = ZInterStore(destination, keysBuf.size, keysBuf, Some(weights), None)
+  def apply(destination: Buf, keysBuf: Seq[Buf], weights: Weights): ZInterStore =
+    ZInterStore(destination, keysBuf.size, keysBuf, Some(weights), None)
 
   def apply(destination: Buf, keysBuf: Seq[Buf]): ZInterStore =
     ZInterStore(destination, keysBuf.size, keysBuf, None, None)
 
-  def apply(destination: Buf, keysBuf: Seq[Buf], weights: Weights, aggregate: Aggregate): ZInterStore =
+  def apply(
+    destination: Buf,
+    keysBuf: Seq[Buf],
+    weights: Weights,
+    aggregate: Aggregate
+  ): ZInterStore =
     ZInterStore(destination, keysBuf.size, keysBuf, Some(weights), Some(aggregate))
 }
 
-case class ZRange(
-    key: Buf,
-    start: Long,
-    stop: Long,
-    withScores: Option[CommandArgument] = None)
-  extends ZRangeCmd {
+case class ZRange(key: Buf, start: Long, stop: Long, withScores: Option[CommandArgument] = None)
+    extends ZRangeCmd {
 
   def name: Buf = Command.ZRANGE
 }
@@ -80,12 +85,12 @@ object ZRange {
 }
 
 case class ZRangeByScore(
-    key: Buf,
-    min: ZInterval,
-    max: ZInterval,
-    withScores: Option[CommandArgument] = None,
-    limit: Option[Limit] = None)
-  extends ZScoredRange {
+  key: Buf,
+  min: ZInterval,
+  max: ZInterval,
+  withScores: Option[CommandArgument] = None,
+  limit: Option[Limit] = None)
+    extends ZScoredRange {
 
   validate()
 
@@ -107,7 +112,8 @@ case class ZRank(key: Buf, member: Buf) extends ZRankCmd {
 case class ZRem(key: Buf, members: Seq[Buf]) extends StrictKeyCommand {
   RequireClientProtocol(
     members != null && members.nonEmpty,
-    "Members list must not be empty for ZREM")
+    "Members list must not be empty for ZREM"
+  )
 
   def name: Buf = Command.ZREM
   override def body: Seq[Buf] = key +: members
@@ -118,30 +124,25 @@ case class ZRemRangeByRank(key: Buf, start: Long, stop: Long) extends StrictKeyC
   override def body: Seq[Buf] = Seq(key, Buf.Utf8(start.toString), Buf.Utf8(stop.toString))
 }
 
-case class ZRemRangeByScore(key: Buf, min: ZInterval, max: ZInterval)
-  extends StrictKeyCommand {
+case class ZRemRangeByScore(key: Buf, min: ZInterval, max: ZInterval) extends StrictKeyCommand {
 
   def name: Buf = Command.ZREMRANGEBYSCORE
   override def body: Seq[Buf] = Seq(key, Buf.Utf8(min.toString), Buf.Utf8(max.toString))
 }
 
-case class ZRevRange(
-    key: Buf,
-    start: Long,
-    stop: Long,
-    withScores: Option[CommandArgument] = None)
-  extends ZRangeCmd {
+case class ZRevRange(key: Buf, start: Long, stop: Long, withScores: Option[CommandArgument] = None)
+    extends ZRangeCmd {
 
   def name: Buf = Command.ZREVRANGE
 }
 
 case class ZRevRangeByScore(
-    key: Buf,
-    max: ZInterval,
-    min: ZInterval,
-    withScores: Option[CommandArgument] = None,
-    limit: Option[Limit] = None)
-  extends ZScoredRange {
+  key: Buf,
+  max: ZInterval,
+  min: ZInterval,
+  withScores: Option[CommandArgument] = None,
+  limit: Option[Limit] = None)
+    extends ZScoredRange {
 
   validate()
 
@@ -155,21 +156,19 @@ case class ZRevRank(key: Buf, member: Buf) extends ZRankCmd {
   def name: Buf = Command.ZREVRANK
 }
 
-case class ZScore(key: Buf, member: Buf)
-  extends StrictKeyCommand
-  with StrictMemberCommand {
+case class ZScore(key: Buf, member: Buf) extends StrictKeyCommand with StrictMemberCommand {
 
   def name: Buf = Command.ZSCORE
   override def body: Seq[Buf] = Seq(key, member)
 }
 
 case class ZUnionStore(
-    destination: Buf,
-    numkeys: Int,
-    keys: Seq[Buf],
-    weights: Option[Weights] = None,
-    aggregate: Option[Aggregate] = None)
-  extends ZStore {
+  destination: Buf,
+  numkeys: Int,
+  keys: Seq[Buf],
+  weights: Option[Weights] = None,
+  aggregate: Option[Aggregate] = None)
+    extends ZStore {
 
   validate()
 
@@ -188,16 +187,17 @@ object ZUnionStore {
 /**
  * Helper Objects
  */
-
 case class ZRangeResults(entries: Array[Buf], scores: Array[Double]) {
   def asTuples(): Seq[(Buf, Double)] =
-    (entries, scores).zipped.map { (entry, score) => (entry, score) }.toSeq
+    (entries, scores).zipped.map { (entry, score) =>
+      (entry, score)
+    }.toSeq
 }
 object ZRangeResults {
   def apply(tuples: Seq[(Buf, Buf)]): ZRangeResults = {
     val arrays = tuples.unzip
     val doubles = arrays._2 map { score =>
-      NumberFormat.toDouble(BytesToString(Buf.ByteArray.Owned.extract(score)))
+      BytesToString(Buf.ByteArray.Owned.extract(score)).toDouble
     }
 
     ZRangeResults(arrays._1.toArray, doubles.toArray)
@@ -206,23 +206,26 @@ object ZRangeResults {
 
 /**
  * Represents part of an interval, helpers in companion object
- * See http://redis.io/commands/zrangebyscore for more info on different intervals
+ * See https://redis.io/commands/zrangebyscore for more info on different intervals
  */
 case class ZInterval(value: String) {
   import ZInterval._
   private val representation = value.toLowerCase match {
     case N_INF => N_INF
     case P_INF => P_INF
-    case double => double.head match {
-      case EXCLUSIVE => RequireClientProtocol.safe {
-        NumberFormat.toDouble(double.tail)
-        double
+    case double =>
+      double.head match {
+        case EXCLUSIVE =>
+          RequireClientProtocol.safe {
+            double.tail.toDouble
+            double
+          }
+        case f =>
+          RequireClientProtocol.safe {
+            value.toDouble
+            double
+          }
       }
-      case f => RequireClientProtocol.safe {
-        NumberFormat.toDouble(value)
-        double
-      }
-    }
   }
 
   override def toString: String = representation
@@ -246,7 +249,6 @@ case class ZMember(score: Double, member: Buf)
 /**
  * Helper Traits
  */
-
 abstract class ZStore extends KeysCommand {
   val destination: Buf
   val numkeys: Int
@@ -254,7 +256,7 @@ abstract class ZStore extends KeysCommand {
   val weights: Option[Weights]
   val aggregate: Option[Aggregate]
 
-  override protected def validate() {
+  override protected def validate(): Unit = {
     super.validate()
     RequireClientProtocol(destination.length > 0, "destination must not be empty")
     RequireClientProtocol(numkeys > 0, "numkeys must be > 0")
@@ -264,7 +266,8 @@ abstract class ZStore extends KeysCommand {
       case Some(list) =>
         RequireClientProtocol(
           list.size == numkeys,
-          "If WEIGHTS specified, numkeys weights required")
+          "If WEIGHTS specified, numkeys weights required"
+        )
       case None =>
     }
   }
@@ -300,7 +303,7 @@ trait ZScoredRange extends KeyCommand { self =>
     command ++ scores ++ limits
   }
 
-  override def validate() {
+  override def validate(): Unit = {
     super.validate()
     withScores.foreach {
       case WithScores =>
@@ -333,4 +336,40 @@ abstract class ZRangeCmd extends StrictKeyCommand {
 
 abstract class ZRankCmd extends StrictKeyCommand with StrictMemberCommand {
   override def body: Seq[Buf] = Seq(key, member)
+}
+
+case class ZScan(key: Buf, cursor: Long, count: Option[JLong] = None, pattern: Option[Buf] = None)
+    extends Command {
+  def name: Buf = Command.ZSCAN
+  override def body: Seq[Buf] = {
+    val bufs = Seq(key, Buf.Utf8(cursor.toString))
+    val withCount = count match {
+      case Some(count) => bufs ++ Seq(Command.COUNT, Buf.Utf8(count.toString))
+      case None => bufs
+    }
+    pattern match {
+      case Some(pattern) => withCount ++ Seq(Command.MATCH, pattern)
+      case None => withCount
+    }
+  }
+}
+
+case class ZPopMin(key: Buf, count: Option[JLong] = None) extends Command {
+  def name: Buf = Command.ZPOPMIN
+  override def body: Seq[Buf] = {
+    count match {
+      case Some(count) => Seq(key, Buf.Utf8(count.toString))
+      case None => Seq(key)
+    }
+  }
+}
+
+case class ZPopMax(key: Buf, count: Option[JLong] = None) extends Command {
+  def name: Buf = Command.ZPOPMAX
+  override def body: Seq[Buf] = {
+    count match {
+      case Some(count) => Seq(key, Buf.Utf8(count.toString))
+      case None => Seq(key)
+    }
+  }
 }

@@ -3,19 +3,21 @@ package com.twitter.finagle.service
 import org.scalatest.FunSuite
 import org.scalatest.junit.JUnitRunner
 import org.junit.runner.RunWith
-import org.scalatest.mock.MockitoSugar
+import org.scalatest.mockito.MockitoSugar
 import org.mockito.Mockito.when
 import org.mockito.Matchers
 import org.mockito.Matchers._
-import com.twitter.util.TimeConversions._
+import com.twitter.conversions.DurationOps._
 import com.twitter.finagle.Service
-import com.twitter.util.{Await, Time, Future}
+import com.twitter.util.{Await, Duration, Future, Time}
 
 @RunWith(classOf[JUnitRunner])
 class RateLimitingFilterTest extends FunSuite with MockitoSugar {
-  class RateLimitingFilterHelper {
+
+  class RateLimitingFilterHelper(duration: Duration = 1.second, rate: Int = 5) {
     def categorize(i: Int) = (i % 5).toString
-    val strategy = new LocalRateLimitingStrategy[Int](categorize, 1.second, 5)
+
+    val strategy = new LocalRateLimitingStrategy[Int](categorize, duration, rate)
     val filter = new RateLimitingFilter[Int, Int](strategy)
     val service = mock[Service[Int, Int]]
     when(service.close(any)) thenReturn Future.Done
@@ -24,7 +26,7 @@ class RateLimitingFilterTest extends FunSuite with MockitoSugar {
     val rateLimitedService = filter andThen service
   }
 
-  test("RateLimitingFilter should Execute requests below rate limit") {
+  test("RateLimitingFilter should execute requests below rate limit") {
     val h = new RateLimitingFilterHelper
     import h._
 
@@ -37,7 +39,7 @@ class RateLimitingFilterTest extends FunSuite with MockitoSugar {
     }
   }
 
-  test("RateLimitingFilter should Refuse request if rate is above limit") {
+  test("RateLimitingFilter should refuse one request above rate limit") {
     val h = new RateLimitingFilterHelper
     import h._
 
@@ -54,16 +56,26 @@ class RateLimitingFilterTest extends FunSuite with MockitoSugar {
     }
   }
 
-  test("RateLimitingFilter should Execute different categories of requests and keep a window per category") {
+  test(
+    "RateLimitingFilter should execute different categories of requests and keep a window per category") {
     val h = new RateLimitingFilterHelper
     import h._
 
     var t = Time.now
     Time.withTimeFunction(t) { _ =>
       (1 to 5) foreach { _ =>
-        (1 to 5) foreach { i => assert(Await.result(rateLimitedService(i)) == 1) }
+        (1 to 5) foreach { i =>
+          assert(Await.result(rateLimitedService(i)) == 1)
+        }
         t += 100.milliseconds
       }
     }
   }
+
+  test("RateLimitingFilter should raise exception if rate limit is negative") {
+    intercept[IllegalArgumentException] {
+      new RateLimitingFilterHelper(rate = 0)
+    }
+  }
+
 }

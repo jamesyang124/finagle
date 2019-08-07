@@ -9,7 +9,7 @@ import org.mockito.Matchers._
 import org.mockito.Mockito.{times, verify, when}
 import org.scalatest.FunSuite
 import org.scalatest.junit.JUnitRunner
-import org.scalatest.mock.MockitoSugar
+import org.scalatest.mockito.MockitoSugar
 
 @RunWith(classOf[JUnitRunner])
 class ShardingServiceTest extends FunSuite with MockitoSugar {
@@ -21,12 +21,11 @@ class ShardingServiceTest extends FunSuite with MockitoSugar {
 
   class ShardingServiceHelper {
     val distributor = mock[Distributor[Service[MockRequest, String]]]
-    val service = new ShardingService(distributor, {
-      request: MockRequest =>
-        request match {
-          case req: ShardingRequest => Some(req.shardingKey)
-          case _ => None
-        }
+    val service = new ShardingService(distributor, { request: MockRequest =>
+      request match {
+        case req: ShardingRequest => Some(req.shardingKey)
+        case _ => None
+      }
     })
 
     val reqA = new ShardingRequest(1L)
