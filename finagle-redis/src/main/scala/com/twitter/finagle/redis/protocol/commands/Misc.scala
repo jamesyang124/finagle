@@ -15,6 +15,10 @@ case class Select(index: Int) extends Command {
   override def body: Seq[Buf] = Seq(Buf.Utf8(index.toString))
 }
 
+case object DBSize extends Command {
+  def name: Buf = Command.DBSIZE
+}
+
 case class Auth(code: Buf) extends Command {
   def name: Buf = Command.AUTH
   override def body: Seq[Buf] = Seq(code)
@@ -33,10 +37,7 @@ case object Quit extends Command {
   def name: Buf = Command.QUIT
 }
 
-case class ConfigSet(
-    param: Buf,
-    value: Buf)
-  extends Config(Buf.Utf8("SET"), Seq(param, value))
+case class ConfigSet(param: Buf, value: Buf) extends Config(Buf.Utf8("SET"), Seq(param, value))
 
 case class ConfigGet(param: Buf) extends Config(Buf.Utf8("GET"), Seq(param))
 
@@ -49,5 +50,10 @@ abstract class Config(sub: Buf, args: Seq[Buf]) extends Command {
 
 case class SlaveOf(host: Buf, port: Buf) extends Command {
   def name: Buf = Command.SLAVEOF
+  override def body: Seq[Buf] = Seq(host, port)
+}
+
+case class ReplicaOf(host: Buf, port: Buf) extends Command {
+  def name: Buf = Command.REPLICAOF
   override def body: Seq[Buf] = Seq(host, port)
 }

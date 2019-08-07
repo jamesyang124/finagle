@@ -16,6 +16,7 @@ case class ByteValue(b: Byte) extends Value
 case class ShortValue(s: Short) extends Value
 case class IntValue(i: Int) extends Value
 case class LongValue(l: Long) extends Value
+case class BigIntValue(bi: BigInt) extends Value
 case class FloatValue(f: Float) extends Value
 case class DoubleValue(d: Double) extends Value
 case class StringValue(s: String) extends Value
@@ -27,17 +28,12 @@ case object NullValue extends Value
  * a value and enough meta data to decode the
  * bytes.
  *
- * @param typ The mysql type code for this value.
- * @param charset The charset encoding of the bytes.
+ * @param typ The MySQL [[Type type]] code for this value.
+ * @param charset The [[MysqlCharset charset]] encoding of the bytes.
  * @param isBinary Disambiguates between the text and binary protocol.
  * @param bytes The raw bytes for this value.
  */
-case class RawValue(
-  typ: Short,
-  charset: Short,
-  isBinary: Boolean,
-  bytes: Array[Byte]
-) extends Value
+case class RawValue(typ: Short, charset: Short, isBinary: Boolean, bytes: Array[Byte]) extends Value
 
 /**
  * A type class used for injecting values of a domain type `A` into
@@ -64,11 +60,10 @@ private[mysql] trait Extractable[A] {
  * @param extractionTimeZone The timezone in which TIMESTAMP and DATETIME
  * rows are extracted from database rows into [[java.sql.Timestamp Timestamps]].
  */
-class TimestampValue(
-    val injectionTimeZone: TimeZone,
-    val extractionTimeZone: TimeZone)
-  extends Injectable[Timestamp] with Extractable[Timestamp]
-{
+class TimestampValue(val injectionTimeZone: TimeZone, val extractionTimeZone: TimeZone)
+    extends Injectable[Timestamp]
+    with Extractable[Timestamp] {
+
   /**
    * Injects a [[java.sql.Timestamp]] into a
    * [[com.twitter.finagle.mysql.RawValue]] in a given `injectionTimeZone`
@@ -85,7 +80,7 @@ class TimestampValue(
     bw.writeByte(cal.get(Calendar.MINUTE))
     bw.writeByte(cal.get(Calendar.SECOND))
     bw.writeIntLE(ts.getNanos / 1000) // sub-second part is written as microseconds
-    RawValue(Type.Timestamp, Charset.Binary, isBinary = true, bytes)
+    RawValue(Type.Timestamp, MysqlCharset.Binary, isBinary = true, bytes)
   }
 
   /**
@@ -94,26 +89,52 @@ class TimestampValue(
    * Extracts timestamps in `extractionTimeZone` for values encoded in either
    * the binary or text MySQL protocols.
    */
-  def unapply(v: Value): Option[Timestamp] = v match {
-    case RawValue(t, charset, false, bytes) if t == Type.Timestamp || t == Type.DateTime =>
-      val str = new String(bytes, Charset(charset))
-      val ts = fromString(str, extractionTimeZone)
-      Some(ts)
+  def unapply(v: Value): Option[Timestamp] =
+    TimestampValue.fromValue(v, extractionTimeZone)
 
-    case RawValue(t, _, true, bytes) if t == Type.Timestamp || t == Type.DateTime =>
-      val ts = fromBytes(bytes, extractionTimeZone)
-      Some(ts)
+}
 
-    case _ => None
-  }
+/**
+ * Extracts a value in UTC. To use a different time zone, create an instance of
+ * [[com.twitter.finagle.mysql.TimestampValue]].
+ */
+object TimestampValue
+    extends TimestampValue(
+      TimeZone.getTimeZone("UTC"),
+      TimeZone.getTimeZone("UTC")
+    ) {
+  private[this] val log = Logger.getLogger("finagle-mysql")
+
+  private[mysql] def isTimestamp(value: Value): Boolean =
+    value match {
+      case raw: RawValue if raw.typ == Type.Timestamp || raw.typ == Type.DateTime => true
+      case _ => false
+    }
+
+  /**
+   * Extracts timestamps in the given `TimeZone` for [[Value]]s encoded in either
+   * the binary or text MySQL protocols.
+   */
+  private[mysql] def fromValue(value: Value, timeZone: TimeZone): Option[Timestamp] =
+    value match {
+      case raw: RawValue if isTimestamp(raw) =>
+        val timestamp = if (!raw.isBinary) {
+          val str = new String(raw.bytes, MysqlCharset(raw.charset))
+          fromString(str, timeZone)
+        } else {
+          fromBytes(raw.bytes, timeZone)
+        }
+        Some(timestamp)
+      case _ => None
+    }
 
   /**
    * Timestamp object that can appropriately
    * represent MySQL zero Timestamp.
    */
   private[this] object Zero extends Timestamp(0) {
-    override val getTime = 0L
-    override val toString = "0000-00-00 00:00:00"
+    override val getTime: Long = 0L
+    override val toString: String = "0000-00-00 00:00:00"
   }
 
   /**
@@ -125,7 +146,6 @@ class TimestampValue(
    *
    * @param str A string representing a TIMESTAMP written in the
    * MySQL text protocol.
-   * @param timeZone The timezone in which to interpret the timestamp.
    */
   private[this] def fromString(str: String, timeZone: TimeZone): Timestamp = {
     if (str == Zero.toString) {
@@ -134,7 +154,7 @@ class TimestampValue(
 
     val parsePosition = new ParsePosition(0)
     val format = TwitterDateFormat("yyyy-MM-dd HH:mm:ss")
-    format.setTimeZone(extractionTimeZone)
+    format.setTimeZone(timeZone)
     val timeInMillis = format.parse(str, parsePosition).getTime
 
     /**
@@ -143,25 +163,31 @@ class TimestampValue(
      * is interpreted as 100 millis and not 1 nanoseconds (like
      * SimpleDateFormat wrongly does.)
      */
-    object Nanos {
-      def unapply(str: String) : Option[Int] = {
-        str match {
-          case "" => Some(0)
-          case s : String if !s.startsWith(".") => None
-          case s : String if s.length() > 10 => None
-          case s : String => Some(s.stripPrefix(".").padTo(9,'0').toInt)
-          case _ => None
+    val index = parsePosition.getIndex
+    if (index >= str.length) {
+      // nothing left to parse, therefore no nanos
+      new Timestamp(timeInMillis)
+    } else if (str.charAt(index) != '.') {
+      // if the next char isn't a . it isn't valid
+      Zero
+    } else {
+      // see what comes after the '.'
+      val rest = str.substring(index + 1)
+      if (rest.length > 9) {
+        // too many characters
+        Zero
+      } else {
+        // convert to an integer then convert to nanos by adding trailing 0s
+        val multiple = math.pow(10, 9 - rest.length).toInt
+        try {
+          val nanos = Integer.parseInt(rest) * multiple
+          val ts = new Timestamp(timeInMillis)
+          ts.setNanos(nanos)
+          ts
+        } catch {
+          case _: NumberFormatException => Zero
         }
       }
-    }
-
-    // Parse fractional part
-    str.substring(parsePosition.getIndex) match {
-      case Nanos(nanos) =>
-        val ts = new Timestamp(timeInMillis)
-        ts.setNanos(nanos)
-        ts
-      case _ => Zero
     }
   }
 
@@ -174,80 +200,52 @@ class TimestampValue(
    *
    * @param bytes A byte-array representing a TIMESTAMP written in the
    * MySQL binary protocol.
-   * @param timeZone The timezone in which to interpret the timestamp.
    */
   private[this] def fromBytes(bytes: Array[Byte], timeZone: TimeZone): Timestamp = {
-    if (bytes.isEmpty) {
+    if (bytes.length == 0) {
       return Zero
     }
 
     var year, month, day, hour, min, sec, micro = 0
     val br = MysqlBuf.reader(bytes)
 
-    // If the len was not zero, we can strictly
-    // expect year, month, and day to be included.
-    if (br.remaining >= 4) {
-      year = br.readUnsignedShortLE()
-      month = br.readUnsignedByte()
-      day = br.readUnsignedByte()
-    } else {
-      return Zero
-    }
+    try {
+      // If the len was not zero, we can strictly
+      // expect year, month, and day to be included.
+      if (br.remaining >= 4) {
+        year = br.readUnsignedShortLE()
+        month = br.readUnsignedByte()
+        day = br.readUnsignedByte()
+      } else {
+        return Zero
+      }
 
-    // if the time-part is 00:00:00, it isn't included.
-    if (br.remaining >= 3) {
-      hour = br.readUnsignedByte()
-      min = br.readUnsignedByte()
-      sec = br.readUnsignedByte()
-    }
+      // if the time-part is 00:00:00, it isn't included.
+      if (br.remaining >= 3) {
+        hour = br.readUnsignedByte()
+        min = br.readUnsignedByte()
+        sec = br.readUnsignedByte()
+      }
 
-    // if the sub-seconds are 0, they aren't included.
-    if (br.remaining >= 4) {
-      micro = br.readIntLE()
-    }
+      // if the sub-seconds are 0, they aren't included.
+      if (br.remaining >= 4) {
+        micro = br.readIntLE()
+      }
 
-    val cal = Calendar.getInstance(timeZone)
-    cal.set(year, month-1, day, hour, min, sec)
+      val cal = Calendar.getInstance(timeZone)
+      cal.set(year, month - 1, day, hour, min, sec)
 
-    val ts = new Timestamp(0)
-    ts.setTime(cal.getTimeInMillis)
-    ts.setNanos(micro * 1000)
-    ts
-  }
-}
-
-/**
- * Extracts a value in UTC. To use a different time zone, create an instance of
- * [[com.twitter.finagle.mysql.TimestampValue]].
- */
-@deprecated("Injects `java.sql.Timestamp`s in local time and extracts them in UTC." +
-  "To use a different time zone, create an instance of " +
-  "TimestampValue(InjectionTimeZone, ExtractionTimeZone)",
-  "6.20.2")
-object TimestampValue extends TimestampValue(
-  TimeZone.getDefault(),
-  TimeZone.getTimeZone("UTC")
-) {
-  private[this] val log = Logger.getLogger("finagle-mysql")
-
-  override def apply(ts: Timestamp): Value = {
-    log.warning(
-      "Injecting timezone-less `java.sql.Timestamp` with a hardcoded local timezone (%s)"
-        .format(injectionTimeZone.getID)
-    )
-    super.apply(ts)
+      val ts = new Timestamp(0)
+      ts.setTime(cal.getTimeInMillis)
+      ts.setNanos(micro * 1000)
+      ts
+    } finally br.close()
   }
 
-  override def unapply(v: Value): Option[Timestamp] = {
-    log.warning(
-      "Extracting TIMESTAMP or DATETIME row as a `java.sql.Timestamp` with a hardcoded timezone (%s)"
-        .format(extractionTimeZone.getID)
-    )
-    super.unapply(v)
-  }
 }
 
 object DateValue extends Injectable[Date] with Extractable[Date] {
+
   /**
    * Creates a RawValue from a java.sql.Date
    */
@@ -259,19 +257,19 @@ object DateValue extends Injectable[Date] with Extractable[Date] {
     bw.writeShortLE(cal.get(Calendar.YEAR))
     bw.writeByte(cal.get(Calendar.MONTH) + 1) // increment 0 indexed month
     bw.writeByte(cal.get(Calendar.DATE))
-    RawValue(Type.Date, Charset.Binary, true, bytes)
+    RawValue(Type.Date, MysqlCharset.Binary, true, bytes)
   }
 
   /**
    * Value extractor for java.sql.Date
    */
   def unapply(v: Value): Option[Date] = v match {
-    case RawValue(Type.Date, Charset.Binary, false, bytes) =>
-      val str = new String(bytes, Charset(Charset.Binary))
+    case RawValue(Type.Date, charset, false, bytes) =>
+      val str = new String(bytes, MysqlCharset(charset))
       if (str == Zero.toString) Some(Zero)
       else Some(Date.valueOf(str))
 
-    case RawValue(Type.Date, Charset.Binary, true, bytes) =>
+    case RawValue(Type.Date, MysqlCharset.Binary, true, bytes) =>
       Some(fromBytes(bytes))
     case _ => None
   }
@@ -294,37 +292,38 @@ object DateValue extends Injectable[Date] with Extractable[Date] {
    * MySQL binary protocol.
    */
   private[this] def fromBytes(bytes: Array[Byte]): Date = {
-    if (bytes.isEmpty) {
+    if (bytes.length == 0) {
       return Zero
     }
 
     var year, month, day = 0
     val br = MysqlBuf.reader(bytes)
+    try {
+      if (br.remaining >= 4) {
+        year = br.readUnsignedShortLE()
+        month = br.readUnsignedByte()
+        day = br.readUnsignedByte()
+      } else {
+        return Zero
+      }
 
-    if (br.remaining >= 4) {
-      year = br.readUnsignedShortLE()
-      month = br.readUnsignedByte()
-      day = br.readUnsignedByte()
-    } else {
-      return Zero
-    }
+      val cal = Calendar.getInstance
+      cal.set(year, month - 1, day)
 
-    val cal = Calendar.getInstance
-    cal.set(year, month-1, day)
-
-    new Date(cal.getTimeInMillis)
+      new Date(cal.getTimeInMillis)
+    } finally br.close()
   }
 }
 
 object BigDecimalValue extends Injectable[BigDecimal] with Extractable[BigDecimal] {
   def apply(b: BigDecimal): Value = {
-    val str = b.toString.getBytes(Charset(Charset.Binary))
-    RawValue(Type.NewDecimal, Charset.Binary, true, str)
+    val str = b.toString.getBytes(MysqlCharset(MysqlCharset.Binary))
+    RawValue(Type.NewDecimal, MysqlCharset.Binary, true, str)
   }
 
   def unapply(v: Value): Option[BigDecimal] = v match {
-    case RawValue(Type.NewDecimal, Charset.Binary, _, bytes) =>
-      Some(BigDecimal(new String(bytes, Charset(Charset.Binary))))
+    case RawValue(Type.NewDecimal, MysqlCharset.Binary, _, bytes) =>
+      Some(BigDecimal(new String(bytes, MysqlCharset(MysqlCharset.Binary))))
     case _ => None
   }
 }

@@ -1,7 +1,13 @@
 package com.twitter.finagle.naming
 
+import com.twitter.app.GlobalFlag
 import com.twitter.finagle._
 import com.twitter.util.Activity
+
+/**
+ * Indicates an error in Namer lookup
+ */
+class NamerExceededMaxDepthException private[finagle](description: String) extends Exception(description)
 
 /**
  * Interpret names against a Dtab. Differs from
@@ -9,11 +15,18 @@ import com.twitter.util.Activity
  * [[com.twitter.finagle.Dtab Dtab]] can affect the resolution process.
  */
 trait NameInterpreter {
+
   /**
    * Bind `path` against the given `dtab`.
    */
   def bind(dtab: Dtab, path: Path): Activity[NameTree[Name.Bound]]
 }
+
+object namerMaxDepth
+  extends GlobalFlag[Int](
+    100,
+    "Maximum recursion level depth for Finagle namer."
+  )
 
 object NameInterpreter extends NameInterpreter {
 
@@ -22,12 +35,12 @@ object NameInterpreter extends NameInterpreter {
    *
    * Can be modified to provide a different mechanism for name resolution.
    */
-  @volatile var global: NameInterpreter = DefaultInterpreter
+  @volatile var global: NameInterpreter = LoadedNameInterpreter
 
   /** Java API for setting the interpreter */
   def setGlobal(nameInterpreter: NameInterpreter): Unit =
     global = nameInterpreter
 
-  override def bind(dtab: Dtab, tree: Path): Activity[NameTree[Name.Bound]] =
-    global.bind(dtab, tree)
+  def bind(dtab: Dtab, path: Path): Activity[NameTree[Name.Bound]] =
+    global.bind(dtab, path)
 }

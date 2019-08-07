@@ -35,6 +35,8 @@ comes with variants that allow for serving a simple ``Service`` as well. Typical
           via a Thrift IDL. See the protocols section on :ref:`Thrift <thrift_and_scrooge>`
           for more details.
 
+.. _server_modules:
+
 Server Modules
 --------------
 
@@ -42,10 +44,12 @@ Finagle servers are simple; they are designed to serve requests quickly. As such
 Finagle minimally furnishes servers with additional behavior. More sophisticated
 behavior lives in the :ref:`clients <finagle_clients>`.
 
-.. figure:: _static/serverstack.svg
+.. raw:: html
+    :file: _static/serverstack.svg
 
-    Fig. 1: A visual representation of each module in a default Finagle server.
-    Requests flow from left to right.
+
+Fig. 1: A visual representation of each module in a default Finagle server.
+Requests flow from left to right.
 
 Many of the server modules act as `admission controllers` that make a decision (based on either a dynamic or
 static property) whether this server can handle the incoming request while maintaining some SLO (Service Level
@@ -71,8 +75,9 @@ override the default instance that simply logs exceptions onto a the standard ou
 Concurrency Limit
 ^^^^^^^^^^^^^^^^^
 
-The `Concurrency Limit` module is implemented by
-:src:`RequestSemaphoreFilter <com/twitter/finagle/filter/RequestSemaphoreFilter.scala>` and maintains
+The `Concurrency Limit` module is implemented by both
+:src:`RequestSemaphoreFilter <com/twitter/finagle/filter/RequestSemaphoreFilter.scala>` and
+:src:`PendingRequestFilter <com/twitter/finagle/service/PendingRequestFilter.scala>` and maintains
 the `concurrency` of the Finagle server.
 
 By default, this module is disabled, which means a Finagle server's requests concurrency is unbounded.
@@ -93,7 +98,10 @@ that might be handled concurrently by your server, use the following example [#e
 The `Concurrency Limit` module is configured with two parameters:
 
 1. `maxConcurrentRequests` - the number of requests allowed to be handled concurrently
-2. `maxWaiters` - the number of requests (on top of `maxConcurrentRequests`) allowed to be queued
+2. `maxWaiters` - the number of requests (on top of `maxConcurrentRequests`) allowed to be queued.
+    The value of this parameter determines which filter is used; if `maxWaiters` is 0, `PendingRequestFilter`
+    is used (saving the overhead of the waiters queue in AsyncSemaphore); otherwise,
+    `RequestSemaphoreFilter` is used.
 
 All the incoming requests on top of ``(maxConcurrentRequests + maxWaiters)`` will be
 `rejected` [#nack]_ by the server. That said, the `Concurrency Limit` module acts as
@@ -138,11 +146,8 @@ Finagle clients, this module is disabled by default (the timeout is unbounded). 
 
 .. rubric:: Footnotes
 
-.. [#nack] Depending on the protocol, a rejected request might be transformed into a `NACK`
-   (currently supported in HTTP/1.1 and Mux) message. A `NACK` means that the server did not attempt
-   to perform any work associated with the request and therefore is typically safe to retry. However,
-   Finagle also supports `NACK` messages that are explicitly non-retryable. See the Retries section of
-   :doc:`/Clients`
+.. [#nack] Depending on the protocol, a rejected request might be transformed into a :ref:`nack <glossary_nack>`
+   (currently supported in HTTP/1.1 and Mux) message.
 
 .. [#example] Configuration parameters/values provided in this example are only demonstrate
    the API usage, not the real world values. We do not recommend blindly applying those values
@@ -160,7 +165,7 @@ it can be configured [#example]_.
 
 .. code-block:: scala
 
-  import com.twitter.conversions.time._
+  import com.twitter.conversions.DurationOps._
   import com.twitter.finagle.Http
 
   val twitter = Http.server

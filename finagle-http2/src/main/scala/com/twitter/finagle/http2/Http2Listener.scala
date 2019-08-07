@@ -1,109 +1,120 @@
 package com.twitter.finagle.http2
 
-import com.twitter.finagle.http
-import com.twitter.finagle.Stack
-import com.twitter.finagle.http2.param.PriorKnowledge
-import com.twitter.finagle.netty4.{DirectToHeapInboundHandlerName, Netty4Listener}
-import com.twitter.finagle.netty4.channel.DirectToHeapInboundHandler
-import com.twitter.finagle.netty4.http.exp.{HttpCodecName, initServer}
+import com.twitter.concurrent.AsyncQueue
+import com.twitter.finagle.http2.transport.H2Filter
+import com.twitter.finagle.{Announcement, ListeningServer, Stack}
+import com.twitter.finagle.netty4.Netty4Listener
+import com.twitter.finagle.netty4.http.{HttpCodecName, initServer, newHttpServerCodec}
+import com.twitter.finagle.netty4.transport.ChannelTransport
 import com.twitter.finagle.server.Listener
-import com.twitter.finagle.transport.{TlsConfig, Transport}
-import io.netty.channel.{ChannelInitializer, Channel, ChannelPipeline,
-  ChannelHandlerContext, ChannelInboundHandlerAdapter}
-import io.netty.handler.codec.http.HttpServerCodec
-import io.netty.handler.codec.http2.{Http2Codec, Http2ServerDowngrader, Http2ResetFrame}
+import com.twitter.finagle.transport.{Transport, TransportContext}
+import com.twitter.util.Awaitable.CanAwait
+import com.twitter.util.{Duration, Future, Time}
+import io.netty.channel.{Channel, ChannelHandler, ChannelInitializer, ChannelPipeline}
+import io.netty.channel.group.DefaultChannelGroup
+import io.netty.util.concurrent.GlobalEventExecutor
+import java.net.SocketAddress
+import scala.collection.JavaConverters._
 
 /**
  * Please note that the listener cannot be used for TLS yet.
  */
-private[http2] object Http2Listener {
-  val PlaceholderName = "placeholder"
+private[finagle] object Http2Listener {
 
-  private[this] def priorKnowledgeListener[In, Out](params: Stack.Params): Listener[In, Out] =
-    Netty4Listener(
-      pipelineInit = { pipeline: ChannelPipeline =>
-        pipeline.addLast(DirectToHeapInboundHandlerName, DirectToHeapInboundHandler)
-        // we inject a dummy handler so we can replace it with the real stuff
-        // after we get `init` in the setupMarshalling phase.
-        pipeline.addLast(PlaceholderName, new ChannelInboundHandlerAdapter(){})
-      },
-      params = params + Netty4Listener.BackPressure(false),
-      setupMarshalling = { init: ChannelInitializer[Channel] =>
-        val initializer = new ChannelInitializer[Channel] {
-          def initChannel(ch: Channel): Unit = {
-            // downgrade from http/2 to http/1.1 types
-            ch.pipeline.addLast(new Http2ServerDowngrader(false /* validateHeaders */))
-            // TODO: send an interrupt instead of dropping the reset frame
-            // we want to drop reset frames because the Http2ServerDowngrader doesn't know what to
-            // do with them, and our dispatchers expect to only get http/1.1 message types.
-            ch.pipeline.addLast(new ChannelInboundHandlerAdapter() {
-              override def channelRead(ctx: ChannelHandlerContext, msg: Object): Unit = {
-                if (!msg.isInstanceOf[Http2ResetFrame])
-                  super.channelRead(ctx, msg)
-              }
-            })
-            initServer(params)(ch.pipeline)
-            ch.pipeline.addLast(init)
-          }
+  def apply[In, Out](
+    params: Stack.Params
+  )(
+    implicit mIn: Manifest[In],
+    mOut: Manifest[Out]
+  ): Listener[In, Out, TransportContext] = {
+    val configuration = params[Transport.ServerSsl].sslServerConfiguration
+
+    val initializer =
+      if (configuration.isDefined)
+        new Http2TlsServerInitializer(
+          _: ChannelInitializer[Channel],
+          params
+        )
+      else new Http2CleartextServerInitializer(_: ChannelInitializer[Channel], params)
+
+    new Http2Listener(params, initializer, mIn, mOut)
+  }
+}
+
+private[http2] class Http2Listener[In, Out](
+  params: Stack.Params,
+  setupMarshalling: ChannelInitializer[Channel] => ChannelHandler,
+  implicit val mIn: Manifest[In],
+  implicit val mOut: Manifest[Out])
+    extends Listener[In, Out, TransportContext] {
+
+  private[this] val channels = new DefaultChannelGroup(GlobalEventExecutor.INSTANCE)
+
+  private[this] val underlyingListener = Netty4Listener[In, Out, TransportContext](
+    pipelineInit = { pipeline: ChannelPipeline =>
+      channels.add(pipeline.channel)
+      pipeline.addLast(HttpCodecName, newHttpServerCodec(params))
+      initServer(params)(pipeline)
+    },
+    params = params,
+    setupMarshalling = setupMarshalling,
+    transportFactory = { ch: Channel =>
+      new ChannelTransport(ch, new AsyncQueue[Any], omitStackTraceOnInactive = true)
+    }
+  )
+
+  // we need to find the underlying handler and tell it how long to wait to drain
+  // before we actually send the `close` signal.
+  private[this] def propagateDeadline(deadline: Time): Unit = {
+    val duration = (deadline - Time.now).inMillis
+    if (duration > 0) {
+      channels.asScala.foreach { channel =>
+        val pipeline = channel.pipeline
+        val handler = pipeline.get(classOf[H2Filter])
+        if (handler != null) {
+          // This is a HTTP/2 connection. Add the deadline to the `H2Filter` and
+          // we'll let it take care of the rest. Note that this races with upgrades
+          // but we can't win them all.
+          handler.setDeadline(deadline)
         }
-        new ChannelInitializer[Channel] {
-          def initChannel(ch: Channel): Unit = {
-            ch.pipeline.replace(PlaceholderName, "http2Codec", new Http2Codec(true, initializer))
-          }
-        }
       }
-    )
-
-
-  private[this] def sourceCodec(params: Stack.Params) = {
-    val maxInitialLineSize = params[http.param.MaxInitialLineSize].size
-    val maxHeaderSize = params[http.param.MaxHeaderSize].size
-    val maxRequestSize = params[http.param.MaxRequestSize].size
-
-    new HttpServerCodec(
-      maxInitialLineSize.inBytes.toInt,
-      maxHeaderSize.inBytes.toInt,
-      maxRequestSize.inBytes.toInt
-    )
+    }
   }
 
-  private[this] def cleartextListener[In, Out](params: Stack.Params): Listener[In, Out] = {
-    Netty4Listener(
-      pipelineInit = { pipeline: ChannelPipeline =>
-        pipeline.addLast(DirectToHeapInboundHandlerName, DirectToHeapInboundHandler)
-        val source = sourceCodec(params)
-        pipeline.addLast(HttpCodecName, source)
-        initServer(params)(pipeline)
-      },
-      params = params,
-      setupMarshalling = {
-        init: ChannelInitializer[Channel] =>
-          new Http2CleartextServerInitializer(init, params)
-      }
-    )
+  def listen(
+    addr: SocketAddress
+  )(serveTransport: Transport[In, Out] {
+      type Context <: TransportContext
+    } => Unit
+  ): ListeningServer = {
+    val underlying = underlyingListener.listen(addr)(serveTransport)
+    new Http2ListeningServer(underlying, propagateDeadline)
+  }
+}
+
+private[http2] class Http2ListeningServer(
+  underlying: ListeningServer,
+  propagateDeadline: Time => Unit)
+    extends ListeningServer {
+
+  // we override announcement so that we delegate the announcement to the underlying listening
+  // server and don't double announce.
+  override def announce(addr: String): Future[Announcement] = underlying.announce(addr)
+
+  def closeServer(deadline: Time): Future[Unit] = {
+    propagateDeadline(deadline)
+    underlying.close(deadline)
   }
 
-  private[this] def tlsListener[In, Out](params: Stack.Params): Listener[In, Out] = {
-    Netty4Listener(
-      pipelineInit = { pipeline: ChannelPipeline =>
-        pipeline.addLast(DirectToHeapInboundHandlerName, DirectToHeapInboundHandler)
-        pipeline.addLast(HttpCodecName, sourceCodec(params))
-        initServer(params)(pipeline)
-      },
-      params = params,
-      setupMarshalling = {
-        init: ChannelInitializer[Channel] => new Http2TlsServerInitializer(init, params)
-      }
-    )
+  override def isReady(implicit permit: CanAwait): Boolean = underlying.isReady(permit)
+
+  def ready(timeout: Duration)(implicit permit: CanAwait): this.type = {
+    underlying.ready(timeout)(permit)
+    this
   }
 
-  def apply[In, Out](params: Stack.Params): Listener[In, Out] = {
-    val PriorKnowledge(priorKnowledge) = params[PriorKnowledge]
-    val Transport.Tls(tlsConfig) = params[Transport.Tls]
+  def result(timeout: Duration)(implicit permit: CanAwait): Unit =
+    underlying.result(timeout)(permit)
 
-
-    if (tlsConfig != TlsConfig.Disabled) tlsListener(params)
-    else if (priorKnowledge) priorKnowledgeListener(params)
-    else cleartextListener(params)
-  }
+  def boundAddress: SocketAddress = underlying.boundAddress
 }

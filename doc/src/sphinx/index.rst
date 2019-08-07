@@ -29,38 +29,48 @@ their behavior.
 
 Other useful resources include:
 
-- “`Your Server as a Function <http://monkey.org/~marius/funsrv.pdf>`_” a paper motivating the core abstractions behind finagle (`PLOS’13 <http://sigops.org/sosp/sosp13/plos.html>`_).
+- `Your Server as a Function <https://monkey.org/~marius/funsrv.pdf>`_, a paper motivating the core abstractions behind finagle (`PLOS’13 <https://sigops.org/sosp/sosp13/plos.html>`_).
 - `Twitter engineering blog entry introducing Finagle <https://blog.twitter.com/2011/finagle-a-protocol-agnostic-rpc-system>`_
-- `ScalaDays 2011 presentation on Finagle <http://days2011.scala-lang.org/node/138/286>`_
-- Twitter's `Scala School <http://twitter.github.com/scala_school/>`_ has a section `introducing Finagle <http://twitter.github.com/scala_school/finagle.html>`_ and another `constructing a distributed search engine using Finagle <http://twitter.github.com/scala_school/searchbird.html>`_
-- Alex Martins’ `post <http://alexmartins.me/2015/12/30/building-fault-tolerant-clients-with-finagle-part-1.html>`_ on configuring fault tolerant Finagle clients (Part 1)
+- Twitter's `Scala School <https://twitter.github.com/scala_school/>`_ has a section `introducing Finagle <https://twitter.github.com/scala_school/finagle.html>`_ and another `constructing a distributed search engine using Finagle <https://twitter.github.com/scala_school/searchbird.html>`_
+- `Finagle 101 <https://kostyukov.net/posts/finagle-101/>`_ by Vladimir Kostyukov
 
-.. _Dapper: http://research.google.com/pubs/pub36356.html
-.. _Zipkin: http://zipkin.io
+.. _Dapper: https://research.google.com/pubs/pub36356.html
+.. _Zipkin: https://zipkin.io
 
-User's guide
-------------
+Contents
+--------
 
 .. toctree::
+   :caption: User's Guide
    :maxdepth: 1
 
    Quickstart
    Futures
    ServicesAndFilters
    Configuration
+   ApertureLoadBalancers
    Servers
    Clients
+   ThreadingModel
    Contexts
    Names
    Protocols
-   Extending
    Metrics
+   Flags
+   UnsuccessfulResponses
    FAQ
-
-Notes
------
+   Glossary
 
 .. toctree::
+   :caption: Developer's Guide
+   :maxdepth: 1
+
+   developers/Extending
+   developers/Futures
+   developers/SignalingFailure
+
+.. toctree::
+   :caption: Notes
    :maxdepth: 1
 
    changelog

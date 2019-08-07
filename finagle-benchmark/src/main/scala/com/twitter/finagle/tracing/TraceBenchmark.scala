@@ -1,13 +1,12 @@
 package com.twitter.finagle.tracing
 
 import com.twitter.finagle.benchmark.StdBenchAnnotations
-import com.twitter.finagle.context.{Deadline, Contexts}
+import com.twitter.finagle.context.{Contexts, Deadline}
 import com.twitter.finagle.thrift.ClientId
 import com.twitter.util.Time
 import org.openjdk.jmh.annotations._
 import org.openjdk.jmh.infra.Blackhole
 
-@OperationsPerInvocation(50)
 @State(Scope.Benchmark)
 class TraceBenchmark extends StdBenchAnnotations {
 
@@ -26,6 +25,10 @@ class TraceBenchmark extends StdBenchAnnotations {
 
   private[this] val deadline = Deadline(Time.Top, Time.Top)
 
+  @Param(Array("3"))
+  var num = 3
+
+  @OperationsPerInvocation(50)
   @Benchmark
   def contexts0(hole: Blackhole): Unit = {
     // Because Contexts are only scoped within a `let`, we want
@@ -38,24 +41,80 @@ class TraceBenchmark extends StdBenchAnnotations {
     }
   }
 
+  @OperationsPerInvocation(50)
   @Benchmark
   def contexts1(hole: Blackhole): Unit =
     Trace.letId(traceId, terminal = false) { contexts0(hole) }
 
+  @OperationsPerInvocation(50)
   @Benchmark
   def contexts2(hole: Blackhole): Unit =
     clientId.asCurrent { contexts1(hole) }
 
+  @OperationsPerInvocation(50)
   @Benchmark
   def contexts3(hole: Blackhole): Unit =
     Contexts.broadcast.let(Deadline, deadline) { contexts2(hole) }
 
+  @OperationsPerInvocation(50)
   @Benchmark
   def contexts4(hole: Blackhole): Unit =
     Contexts.broadcast.letClear(Deadline) { contexts3(hole) }
 
+  @OperationsPerInvocation(50)
   @Benchmark
   def contexts5(hole: Blackhole): Unit =
     Trace.letTracer(NullTracer) { contexts4(hole) }
 
+  private[this] def traced(n: Int): Boolean =
+    if (n == 0) {
+      Trace.letId(traceId) {
+        Trace.isActivelyTracing
+      }
+    } else {
+      Trace.letTracer(ConsoleTracer) {
+        traced(n - 1)
+      }
+    }
+
+  @Benchmark
+  def isActivelyTracing: Boolean =
+    traced(num)
+
+  @Benchmark
+  @Warmup(iterations = 3)
+  @Measurement(iterations = 5)
+  @Threads(4)
+  def recordAnnotationSlow(): Unit =
+    Trace.letTracer(TraceBenchmark.NoopAlwaysSamplingTracer) {
+      if (Trace.isActivelyTracing) {
+        Trace.record(Annotation.WireSend)
+        Trace.record(Annotation.WireSend)
+        Trace.record(Annotation.WireSend)
+        Trace.record(Annotation.WireSend)
+      }
+    }
+
+  @Benchmark
+  @Warmup(iterations = 3)
+  @Measurement(iterations = 5)
+  @Threads(4)
+  def recordAnnotationFast(): Unit =
+    Trace.letTracer(TraceBenchmark.NoopAlwaysSamplingTracer) {
+      val trace = Trace()
+      if (trace.isActivelyTracing) {
+        trace.record(Annotation.WireSend)
+        trace.record(Annotation.WireSend)
+        trace.record(Annotation.WireSend)
+        trace.record(Annotation.WireSend)
+      }
+    }
+}
+
+private object TraceBenchmark {
+  private val NoopAlwaysSamplingTracer: Tracer = new Tracer {
+    def record(record: Record): Unit = ()
+    def sampleTrace(traceId: TraceId): Option[Boolean] = Tracer.SomeTrue
+    override def isActivelyTracing(traceId: TraceId): Boolean = true
+  }
 }

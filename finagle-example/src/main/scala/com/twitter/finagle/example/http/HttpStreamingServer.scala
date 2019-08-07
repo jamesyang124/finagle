@@ -1,10 +1,10 @@
 package com.twitter.finagle.example.http
 
 import com.twitter.concurrent.AsyncStream
-import com.twitter.conversions.time._
+import com.twitter.conversions.DurationOps._
 import com.twitter.finagle.http.{Request, Response, Status}
 import com.twitter.finagle.{Http, Service}
-import com.twitter.io.{Buf, Reader}
+import com.twitter.io.{Buf, Pipe}
 import com.twitter.util.{Await, Future, JavaTimer}
 import scala.util.Random
 
@@ -19,7 +19,7 @@ object HttpStreamingServer {
   def ints(): AsyncStream[Int] =
     random.nextInt +::
       AsyncStream.fromFuture(Future.sleep(100.millis)).flatMap(_ => ints())
-  
+
   def main(args: Array[String]): Unit = {
     val service = new Service[Request, Response] {
       // Only one stream exists.
@@ -30,18 +30,19 @@ object HttpStreamingServer {
       messages.foreach(_ => messages = messages.drop(1))
 
       def apply(request: Request): Future[Response] = {
-        val writable = Reader.writable()
+        val writable = new Pipe[Buf]()
         // Start writing thread.
         messages.foreachF(writable.write)
         Future.value(Response(request.version, Status.Ok, writable))
       }
     }
 
-    Await.result(Http.server
+    Await.result(
+      Http.server
       // Translate buffered writes into HTTP chunks.
-      .withStreaming(enabled = true)
-      // Listen on port 8080.
-      .serve("0.0.0.0:8080", service)
+        .withStreaming(enabled = true)
+        // Listen on port 8080.
+        .serve("0.0.0.0:8080", service)
     )
   }
 }

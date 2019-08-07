@@ -1,36 +1,76 @@
 package com.twitter.finagle.pool
 
 import com.twitter.finagle._
+import com.twitter.conversions.DurationOps._
 import com.twitter.finagle.stats.NullStatsReceiver
-import com.twitter.util.{Await, Future, Promise, Return, Throw, Time}
-import org.junit.runner.RunWith
+import com.twitter.util.{Await, Awaitable, Future, Promise, Return, Throw, Time}
 import org.mockito.Matchers.any
 import org.mockito.Mockito.{never, times, verify, when}
 import org.scalatest.FunSuite
-import org.scalatest.junit.JUnitRunner
-import org.scalatest.mock.MockitoSugar
+import org.scalatest.mockito.MockitoSugar
 
-@RunWith(classOf[JUnitRunner])
-class SingletonPoolTest extends FunSuite with MockitoSugar {
-  class Ctx {
+object SingletonPoolTest {
+  private def await[T](t: Awaitable[T]): T = Await.result(t, 1.second)
+
+  private class Ctx(allowInterrupts: Boolean = true) extends MockitoSugar {
     val underlying = mock[ServiceFactory[Int, Int]]
+
     val closeP = new Promise[Unit]
     when(underlying.close(any[Time])).thenReturn(closeP)
     when(underlying.status).thenReturn(Status.Open)
+
     val service = mock[Service[Int, Int]]
     when(service.close(any[Time])).thenReturn(Future.Done)
     when(service.status).thenReturn(Status.Open)
+
     val service2 = mock[Service[Int, Int]]
     when(service2.close(any[Time])).thenReturn(Future.Done)
     when(service2.status).thenReturn(Status.Open)
-    val underlyingP = new Promise[Service[Int, Int]]
-    when(underlying(any[ClientConnection])).thenReturn(underlyingP)
-    val pool = new SingletonPool(underlying, NullStatsReceiver)
 
-    def assertClosed() {
+    val underlyingP = new Promise[Service[Int, Int]]
+    underlyingP.setInterruptHandler { case t => underlyingP.updateIfEmpty(Throw(t)) }
+    when(underlying(any[ClientConnection])).thenReturn(underlyingP)
+    val pool = new SingletonPool(underlying, allowInterrupts, NullStatsReceiver)
+
+    def assertClosed(): Unit = {
       val Some(Throw(Failure(Some(cause)))) = pool().poll
       assert(cause.isInstanceOf[ServiceClosedException])
     }
+  }
+}
+
+class SingletonPoolTest extends FunSuite {
+  import SingletonPoolTest._
+
+  test("doesn't leak connections on interruption with (allowInterrupts=false)") {
+    val ctx = new Ctx(allowInterrupts = false)
+    import ctx._
+
+    when(underlying.status).thenReturn(Status.Open)
+
+    val ex = new Exception("Impatient.")
+
+    // We do it twice, just to make sure there are no surprises.
+    val service1 = pool()
+    assert(!service1.isDefined)
+    service1.raise(ex)
+    assert(service1.poll == Some(Throw(ex)))
+
+    val service2 = pool()
+    assert(!service2.isDefined)
+    service2.raise(ex)
+    assert(service2.poll == Some(Throw(ex)))
+
+    val underlyingService = mock[Service[Int, Int]]
+    when(underlyingService.status).thenReturn(Status.Open)
+    when(underlyingService.close()).thenReturn(Future.Done)
+    underlyingP.setValue(underlyingService)
+
+    assert(pool.isAvailable)
+    pool.close()
+    assert(!pool.isAvailable)
+    verify(underlyingService, times(1)).close()
+    verify(underlying, times(1)).close()
   }
 
   test("available when underlying is; unavailable when closed") {
@@ -97,11 +137,11 @@ class SingletonPoolTest extends FunSuite with MockitoSugar {
     verify(service, times(3)).status
 
     verify(service, never).close(any[Time])
-    Await.result(fst).close()
+    await(fst).close()
     verify(service, times(1)).close(any[Time])
 
     verify(underlying, times(2)).apply(any[ClientConnection])
-    Await.result(snd).close()
+    await(snd).close()
     verify(service2, never).close(any[Time])
   }
 
@@ -195,7 +235,7 @@ class SingletonPoolTest extends FunSuite with MockitoSugar {
     assert(pool.close().poll == Some(Return.Unit))
     assertClosed()
     verify(service, never).close(any[Time])
-    assert(Await.result(f).close().poll == Some(Return.Unit))
+    assert(await(f).close().poll == Some(Return.Unit))
     verify(service, times(1)).close(any[Time])
   }
 
@@ -206,19 +246,19 @@ class SingletonPoolTest extends FunSuite with MockitoSugar {
     val f = pool()
     underlyingP.setValue(service)
     assert(f.isDefined)
-    Await.result(f).close()
+    await(f).close()
 
     verify(underlying, never).close(any[Time])
-    
+
     val close = pool.close()
     assert(!close.isDefined)
-    
+
     // The pool is closed for business, even if it isn't done
     // *closing* yet.
     assertClosed()
 
     verify(underlying, times(1)).close(any[Time])
-    
+
     closeP.setDone()
     assert(close.isDefined)
   }
@@ -231,11 +271,11 @@ class SingletonPoolTest extends FunSuite with MockitoSugar {
     assert(!f.isDefined)
     underlyingP.setValue(service)
     assert(f.poll == Some(Return(service)))
-    Await.result(Await.result(f).close())
+    await(await(f).close())
 
     val g = pool()
     assert(g.poll == Some(Return(service)))
-    Await.result(Await.result(g).close())
+    await(await(g).close())
 
     verify(underlying, times(1)).apply(any[ClientConnection])
     verify(service, never).close(any[Time])
@@ -244,7 +284,7 @@ class SingletonPoolTest extends FunSuite with MockitoSugar {
   test("composes pool and service status") {
     val ctx = new Ctx
     import ctx._
-    
+
     // Not yet initialized.
     assert(pool.status == Status.Open)
     verify(underlying, times(1)).status
@@ -254,19 +294,19 @@ class SingletonPoolTest extends FunSuite with MockitoSugar {
     when(underlying.status).thenReturn(Status.Open)
     underlyingP.setValue(service)
 
-    val s = Await.result(pool())
+    val s = await(pool())
     assert(pool.status == Status.Open)
     when(service.status).thenReturn(Status.Busy)
     assert(pool.status == Status.Busy)
     when(underlying.status).thenReturn(Status.Closed)
     assert(pool.status == Status.Closed)
     when(underlying.status).thenReturn(Status.Busy)
-    
+
     when(service.status).thenReturn(Status.Open)
     assert(pool.status == Status.Busy)
     when(pool.status).thenReturn(Status.Open)
     assert(pool.status == Status.Open)
-    
+
     // After close, we're forever Closed.
     pool.close()
     assert(pool.status == Status.Closed)
@@ -275,17 +315,40 @@ class SingletonPoolTest extends FunSuite with MockitoSugar {
   test("ignore cached but Closed service status") {
     val ctx = new Ctx
     import ctx._
-    
+
     underlyingP.setValue(service)
-    val s = Await.result(pool())
-    
+    val s = await(pool())
+
     // We're checked out; reflect the service status
     when(service.status).thenReturn(Status.Busy)
     assert(pool.status == Status.Busy)
-    
+
     when(service.status).thenReturn(Status.Closed)
     assert(pool.status == Status.Open)
     when(underlying.status).thenReturn(Status.Closed)
     assert(pool.status == Status.Closed)
+  }
+
+  test("interrupts propagate when allowInterrupts is set") {
+    val ctx = new Ctx(allowInterrupts = true)
+    import ctx._
+    val sf = pool()
+    val exc = new Exception("timeout!")
+    sf.raise(exc)
+    assert(exc == intercept[Exception] { await(sf) })
+    assert(exc == intercept[Exception] { await(underlyingP) })
+  }
+
+  test("interrupts don't propagate when allowInterrupts is not set") {
+    val ctx = new Ctx(allowInterrupts = false)
+    import ctx._
+    val sf = pool()
+    val exc = new Exception("timeout!")
+    sf.raise(exc)
+    assert(exc == intercept[Exception] { await(sf) })
+    // the above interrupt didn't interfere with the underlying
+    // service acquisition request!
+    underlyingP.setValue(service)
+    assert(service == await(underlyingP))
   }
 }

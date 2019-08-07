@@ -1,23 +1,24 @@
 package com.twitter.finagle.stats
 
-/**
- * Provides a `StatsReceiver` that prints nice summaries. Handy for
- * short-lived programs where you want summaries.
- */
-
 import com.github.benmanes.caffeine.cache.{Caffeine, CacheLoader}
 import java.util.concurrent.ConcurrentHashMap
 import java.util.concurrent.atomic.AtomicLong
 import scala.collection.JavaConverters._
 import scala.collection.mutable.ArrayBuffer
 
+/**
+ * Provides a `StatsReceiver` that prints nice summaries. Handy for
+ * short-lived programs where you want summaries.
+ */
 class SummarizingStatsReceiver extends StatsReceiverWithCumulativeGauges {
-  val repr = this
+
+  def repr: SummarizingStatsReceiver = this
 
   private[this] val counters = new ConcurrentHashMap[Seq[String], AtomicLong]()
 
   // Just keep all the samples.
-  private[this] val stats = Caffeine.newBuilder()
+  private[this] val stats = Caffeine
+    .newBuilder()
     .build(new CacheLoader[Seq[String], ArrayBuffer[Float]] {
       def load(k: Seq[String]): ArrayBuffer[Float] = new ArrayBuffer[Float]
     })
@@ -26,21 +27,22 @@ class SummarizingStatsReceiver extends StatsReceiverWithCumulativeGauges {
   private[this] var _gauges = Map[Seq[String], () => Float]()
   def gauges: Map[Seq[String], () => Float] = synchronized { _gauges }
 
-  def counter(name: String*): Counter = new Counter {
+  def counter(verbosity: Verbosity, name: String*): Counter = new Counter {
     counters.putIfAbsent(name, new AtomicLong(0))
-    def incr(delta: Int) { counters.get(name).getAndAdd(delta) }
+    def incr(delta: Long): Unit = counters.get(name).getAndAdd(delta)
   }
 
-  def stat(name: String*): Stat = new Stat {
-    def add(value: Float) = SummarizingStatsReceiver.this.synchronized {
+  def stat(verbosity: Verbosity, name: String*): Stat = new Stat {
+    def add(value: Float): Unit = SummarizingStatsReceiver.this.synchronized {
       stats.get(name) += value
     }
   }
 
   // Ignoring gauges for now, but we may consider sampling them.
-  protected[this] def registerGauge(name: Seq[String], f: => Float): Unit = synchronized {
-    _gauges += (name -> (() => f))
-  }
+  protected[this] def registerGauge(verbosity: Verbosity, name: Seq[String], f: => Float): Unit =
+    synchronized {
+      _gauges += (name -> (() => f))
+    }
 
   protected[this] def deregisterGauge(name: Seq[String]): Unit = synchronized {
     _gauges -= name
@@ -49,7 +51,7 @@ class SummarizingStatsReceiver extends StatsReceiverWithCumulativeGauges {
   /* Summary */
   /* ======= */
 
-  private[this] def variableName(name: Seq[String]) = name mkString "/"
+  private[this] def variableName(name: Seq[String]): String = name.mkString("/")
 
   def summary(): String = summary(false)
 
@@ -58,7 +60,7 @@ class SummarizingStatsReceiver extends StatsReceiverWithCumulativeGauges {
     val gaugeValues = gauges.toSeq map {
       case (names, gauge) => variableName(names) -> gauge().toString
     }
-    val statValues = stats.asMap.asScala collect {
+    val statValues = stats.asMap.asScala.collect {
       case (k, buf) if buf.nonEmpty =>
         val n = buf.size
         val values = new Array[Float](n)
@@ -67,39 +69,59 @@ class SummarizingStatsReceiver extends StatsReceiverWithCumulativeGauges {
         (k, xs)
     }
 
-    val counterLines = (counterValues map { case (k, v) => (variableName(k), v.get.toString) }).toSeq
-    val statLines = (statValues map { case (k, xs) =>
-      val n = xs.length
-      def idx(ptile: Double) = math.floor(ptile*n).toInt
-      (variableName(k), "n=%d min=%.1f med=%.1f p90=%.1f p95=%.1f p99=%.1f p999=%.1f p9999=%.1f max=%.1f".format(
-        n, xs(0), xs(n/2), xs(idx(.9D)), xs(idx(.95D)), xs(idx(.99D)), xs(idx(.999D)), xs(idx(.9999D)), xs(n-1)))
-    }).toSeq
+    val counterLines =
+      counterValues.map {
+        case (k, v) =>
+          (variableName(k), v.get.toString)
+      }.toSeq
+    val statLines = statValues.map {
+      case (k, xs) =>
+        val n = xs.length
+        def idx(ptile: Double) = math.floor(ptile * n).toInt
+        (
+          variableName(k),
+          "n=%d min=%.1f med=%.1f p90=%.1f p95=%.1f p99=%.1f p999=%.1f p9999=%.1f max=%.1f".format(
+            n,
+            xs(0),
+            xs(n / 2),
+            xs(idx(.9D)),
+            xs(idx(.95D)),
+            xs(idx(.99D)),
+            xs(idx(.999D)),
+            xs(idx(.9999D)),
+            xs(n - 1)
+          )
+        )
+    }.toSeq
 
-    lazy val tailValues = (statValues map { case (k, xs) =>
-      val n = xs.length
-      def slice(ptile: Double) = {
-        val end = math.floor(ptile*n).toInt
-        val start = math.ceil(end-((1.0-ptile)*n)).toInt
-        for (i <- start to end) yield xs(i)
-      }
-      (variableName(k), "p999=%s, p9999=%s".format(slice(.999D), slice(.9999D)))
-    }).toSeq
+    lazy val tailValues = statValues.map {
+      case (k, xs) =>
+        val n = xs.length
+        def slice(ptile: Double) = {
+          val end = math.floor(ptile * n).toInt
+          val start = math.ceil(end - ((1.0 - ptile) * n)).toInt
+          for (i <- start to end) yield xs(i)
+        }
+        (variableName(k), "p999=%s, p9999=%s".format(slice(.999D), slice(.9999D)))
+    }.toSeq
 
-    val sortedCounters      = counterLines.sortBy { case (k, _) => k }
-    val sortedGauges        = gaugeValues.sortBy  { case (k, _) => k }
-    val sortedStats         = statLines.sortBy    { case (k, _) => k }
-    lazy val sortedTails    = tailValues.sortBy   { case (k, _) => k }
+    val sortedCounters = counterLines.sortBy { case (k, _) => k }
+    val sortedGauges = gaugeValues.sortBy { case (k, _) => k }
+    val sortedStats = statLines.sortBy { case (k, _) => k }
+    lazy val sortedTails = tailValues.sortBy { case (k, _) => k }
 
-    val fmt = Function.tupled { (k: String, v: String) => "%-30s %s".format(k, v) }
+    val fmt = Function.tupled { (k: String, v: String) =>
+      "%-30s %s".format(k, v)
+    }
     val fmtCounters = sortedCounters.map(fmt)
     val fmtGauges = gaugeValues.map(fmt)
     val fmtStats = sortedStats.map(fmt)
     lazy val fmtTails = sortedTails.map(fmt)
 
     "# counters\n" + fmtCounters.mkString("\n") +
-    "\n# gauges\n" + fmtGauges.sorted.mkString("\n") +
-    "\n# stats\n" + fmtStats.mkString("\n") +
-    (if (includeTails) "\n# stats-tails\n" + (fmtTails mkString "\n") else "")
+      "\n# gauges\n" + fmtGauges.sorted.mkString("\n") +
+      "\n# stats\n" + fmtStats.mkString("\n") +
+      (if (includeTails) "\n# stats-tails\n" + fmtTails.mkString("\n") else "")
   }
 
   def print(): Unit = println(summary(false))

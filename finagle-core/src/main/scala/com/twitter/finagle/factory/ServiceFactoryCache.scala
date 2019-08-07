@@ -1,5 +1,6 @@
 package com.twitter.finagle.factory
 
+import com.twitter.conversions.DurationOps._
 import com.twitter.finagle._
 import com.twitter.finagle.stats.{NullStatsReceiver, StatsReceiver}
 import com.twitter.util._
@@ -7,14 +8,14 @@ import java.util
 import java.util.concurrent.atomic.AtomicInteger
 import java.util.concurrent.locks.StampedLock
 import scala.collection.JavaConverters._
+import scala.collection.mutable.ListBuffer
 
 /**
  * A service factory that keeps track of idling times to implement
  * cache eviction.
  */
-private class IdlingFactory[Req, Rep](
-    self: ServiceFactory[Req, Rep])
-  extends ServiceFactoryProxy[Req, Rep](self) {
+private class IdlingFactory[Req, Rep](self: ServiceFactory[Req, Rep])
+    extends ServiceFactoryProxy[Req, Rep](self) {
   @volatile private[this] var watch = Stopwatch.start()
   private[this] val n = new AtomicInteger(0)
 
@@ -54,17 +55,28 @@ private class IdlingFactory[Req, Rep](
 }
 
 /**
- * A "read-through" cache of service factories. Eviction is based on
- * idle time -- when no underlying factories are idle, one-shot
- * factories are created. This doesn't necessarily guarantee good
- * performance: one-shots could be created constantly for a hot cache
- * key, but should work well when there are a few hot keys.
+ * A "read-through" cache of service factories.
+ *
+ * Eviction is based on cache size and idle time:
+ *
+ * 1. When the cache is full, a miss evicts the most idle factory.
+ * When no underlying factories are idle, a one-shot factory is created.
+ * This doesn't necessarily guarantee good performance: one-shots could
+ * be created constantly for a hot cache key, but should work well
+ * when there are a few hot keys.
+ *
+ * 2. Periodically evict factories that are idle for at least one TTI
+ * (time-to-idle) period. An idle factory could remain in the cache
+ * for up to (TTI * 2) minutes, with the caveat that we never expire
+ * the last, least-idle entry.
  */
-private[finagle] class ServiceFactoryCache[Key, Req, Rep](
-    newFactory: Key => ServiceFactory[Req, Rep],
-    statsReceiver: StatsReceiver = NullStatsReceiver,
-    maxCacheSize: Int = 8)
-  extends Closable {
+class ServiceFactoryCache[Key, Req, Rep](
+  newFactory: Key => ServiceFactory[Req, Rep],
+  timer: Timer,
+  statsReceiver: StatsReceiver = NullStatsReceiver,
+  maxCacheSize: Int = 8,
+  tti: Duration = 10.minutes)
+    extends Closable {
   assert(maxCacheSize > 0)
 
   private[this] val cache = new util.HashMap[Key, IdlingFactory[Req, Rep]]()
@@ -73,7 +85,38 @@ private[finagle] class ServiceFactoryCache[Key, Req, Rep](
 
   private[this] val nmiss = statsReceiver.counter("misses")
   private[this] val nevict = statsReceiver.counter("evicts")
+  private[this] val nexpires = statsReceiver.counter("expires")
   private[this] val noneshot = statsReceiver.counter("oneshots")
+
+  /**
+   * Evict entries that have been idle for longer than `tti`. If this
+   * would empty the cache, instead evict all but the least idle entry.
+   */
+  private[this] def expireIdle(): Unit = {
+    val writeStamp = lock.writeLock()
+    try {
+      val expired = cache.asScala.filter { case (_, fac) => fac.idleFor > tti }
+      if (expired.nonEmpty) {
+        val evictees = if (expired.size == cache.size) {
+          expired - expired.minBy { case (_, fac) => fac.idleFor }._1
+        } else {
+          expired
+        }
+        evictees.foreach {
+          case (key, _) =>
+            val removed = cache.remove(key)
+            removed.close()
+        }
+        nexpires.incr(evictees.size)
+      }
+    } finally {
+      lock.unlockWrite(writeStamp)
+    }
+  }
+
+  private[this] val expiryTask: Closable = {
+    timer.schedule(tti) { expireIdle() }
+  }
 
   /*
    * This returns a Service rather than a ServiceFactory to avoid
@@ -121,8 +164,7 @@ private[finagle] class ServiceFactoryCache[Key, Req, Rep](
             case Some(evicted) =>
               nevict.incr()
               val removed = cache.remove(evicted)
-              if (removed != null)
-                removed.close()
+              removed.close()
               cache.put(key, factory)
               factory(conn)
             case None =>
@@ -149,10 +191,6 @@ private[finagle] class ServiceFactoryCache[Key, Req, Rep](
       }
     }
 
-  private[this] val maxIdleFn: ((Key, IdlingFactory[Req, Rep])) => Duration = {
-    case (_, fac) => fac.idleFor
-  }
-
   /** Must be called with the "write lock" held. */
   private[this] def findEvictee: Option[Key] = {
     var maxIdleFor = Duration.Bottom
@@ -172,17 +210,26 @@ private[finagle] class ServiceFactoryCache[Key, Req, Rep](
   }
 
   def close(deadline: Time): Future[Unit] = {
-    val svcFacs = cache.values.asScala.toSeq
-    Closable.all(svcFacs: _*).close(deadline)
+    val writeStamp = lock.writeLock()
+    val svcFacs = try {
+      val values = ListBuffer.empty[Closable]
+      val it = cache.values.iterator
+      // Clear the cache to avoid racing with the timer task. If the
+      // task is invoked after releasing this lock but before it has
+      // a chance to close, it will be a noop.
+      while (it.hasNext) {
+        values += it.next()
+        it.remove()
+      }
+      values
+    } finally {
+      lock.unlockWrite(writeStamp)
+    }
+    val closables = svcFacs :+ expiryTask
+    Closable.all(closables: _*).close(deadline)
   }
 
-  private[this] val svcFacStatusFn: ServiceFactory[Req, Rep] => Status =
-    svcFac => svcFac.status
-
-  def status: Status =
-    Status.bestOf(cache.values.asScala, svcFacStatusFn)
-
-  def status(key: Key): Status = {
+  private[finagle] def status(key: Key): Status = {
     val readStamp = lock.readLock()
     try {
       val svcFac = cache.get(key)

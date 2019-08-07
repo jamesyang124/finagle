@@ -1,6 +1,6 @@
 package com.twitter.finagle.factory
 
-import com.twitter.conversions.time._
+import com.twitter.conversions.DurationOps._
 import com.twitter.finagle._
 import com.twitter.util.{Await, Future, Promise, MockTimer, Return, Time}
 import org.mockito.Matchers.any
@@ -8,7 +8,7 @@ import org.mockito.Mockito.{verify, when}
 import org.junit.runner.RunWith
 import org.scalatest.FunSuite
 import org.scalatest.junit.JUnitRunner
-import org.scalatest.mock.MockitoSugar
+import org.scalatest.mockito.MockitoSugar
 import scala.language.reflectiveCalls
 
 @RunWith(classOf[JUnitRunner])
@@ -50,7 +50,9 @@ class TimeoutFactoryTest extends FunSuite with MockitoSugar {
     }
   }
 
-  test("TimeoutFactory after the timeout should interrupt the underlying promise with a TimeoutException") {
+  test(
+    "TimeoutFactory after the timeout should interrupt the underlying promise with a TimeoutException"
+  ) {
     new AfterHelper {
       assert(promise.interrupted forall {
         case _: java.util.concurrent.TimeoutException => true

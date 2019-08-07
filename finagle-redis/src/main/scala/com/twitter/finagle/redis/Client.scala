@@ -1,13 +1,11 @@
 package com.twitter.finagle.redis
 
-import com.twitter.finagle.netty3.ChannelBufferBuf
 import com.twitter.finagle.{Service, ClientConnection, ServiceFactory, ServiceProxy}
 import com.twitter.finagle.redis.exp.{RedisPool, SubscribeCommands}
 import com.twitter.finagle.redis.protocol._
 import com.twitter.finagle.util.DefaultTimer
 import com.twitter.io.Buf
 import com.twitter.util.{Closable, Future, Time, Timer}
-import org.jboss.netty.buffer.ChannelBuffer
 
 object Client {
 
@@ -26,27 +24,29 @@ object Client {
 }
 
 class Client(
-    override val factory: ServiceFactory[Command, Reply],
-    private[redis] val timer: Timer = DefaultTimer.twitter)
-  extends BaseClient(factory)
-  with NormalCommands
-  with SubscribeCommands
-  with Transactions
+  override val factory: ServiceFactory[Command, Reply],
+  private[redis] val timer: Timer = DefaultTimer)
+    extends BaseClient(factory)
+    with NormalCommands
+    with SubscribeCommands
+    with Transactions
 
 trait NormalCommands
-  extends KeyCommands
-  with StringCommands
-  with HashCommands
-  with SortedSetCommands
-  with ListCommands
-  with SetCommands
-  with BtreeSortedSetCommands
-  with TopologyCommands
-  with HyperLogLogCommands
-  with PubSubCommands
-  with ServerCommands
-  with ScriptCommands
-  with ConnectionCommands { self: BaseClient =>
+    extends KeyCommands
+    with StringCommands
+    with HashCommands
+    with SortedSetCommands
+    with ListCommands
+    with SetCommands
+    with BtreeSortedSetCommands
+    with TopologyCommands
+    with HyperLogLogCommands
+    with GeoCommands
+    with PubSubCommands
+    with ServerCommands
+    with ScriptCommands
+    with ConnectionCommands
+    with StreamCommands { self: BaseClient =>
 }
 
 trait Transactions { self: Client =>
@@ -85,9 +85,7 @@ trait Transactions { self: Client =>
  * Connects to a single Redis host
  * @param factory: Finagle service factory object built with the Redis codec
  */
-abstract class BaseClient(
-  protected val factory: ServiceFactory[Command, Reply])
-  extends Closable {
+abstract class BaseClient(protected val factory: ServiceFactory[Command, Reply]) extends Closable {
 
   /**
    * Releases underlying service factory object
@@ -97,13 +95,18 @@ abstract class BaseClient(
   /**
    * Helper function for passing a command to the service
    */
-  // Review 2
-  private[redis] def doRequest[T](cmd: Command)(handler: PartialFunction[Reply, Future[T]]): Future[T] = {
-    factory.toService.apply(cmd).flatMap (handler orElse {
-      case ErrorReply(message)   => Future.exception(new ServerError(message))
-      case StatusReply("QUEUED") => Future.Done.asInstanceOf[Future[Nothing]]
-      case _                     => Future.exception(new IllegalStateException)
-    })}
+  private[redis] def doRequest[T](
+    cmd: Command
+  )(handler: PartialFunction[Reply, Future[T]]
+  ): Future[T] = {
+    factory.toService
+      .apply(cmd)
+      .flatMap(handler orElse {
+        case ErrorReply(message) => Future.exception(new ServerError(message))
+        case StatusReply("QUEUED") => Future.Done.asInstanceOf[Future[Nothing]]
+        case _ => Future.exception(new IllegalStateException)
+      })
+  }
 
   /**
    * Helper function to convert a Redis multi-bulk reply into a map of pairs
@@ -118,6 +121,7 @@ abstract class BaseClient(
 }
 
 object TransactionalClient {
+
   /**
    * Construct a client from a single host with transaction commands
    * @param host a String of host:port combination.
@@ -138,7 +142,8 @@ object TransactionalClient {
  * single redis instance, supporting transactions
  */
 class TransactionalClient(factory: ServiceFactory[Command, Reply])
-  extends BaseClient(factory) with NormalCommands {
+    extends BaseClient(factory)
+    with NormalCommands {
 
   private[this] var _multi = false
   private[this] var _watch = false
@@ -152,14 +157,6 @@ class TransactionalClient(factory: ServiceFactory[Command, Reply])
         _watch = false
         Future.Unit
     }
-
-  /**
-   * Marks given keys to be watched for conditional execution of a transaction
-   * @param keys to watch
-   */
-  @deprecated("remove netty3 types from public API", "2016-03-15")
-  def watch(keys: Seq[ChannelBuffer]): Future[Unit] =
-    watches(keys.map(ChannelBufferBuf.Owned(_)))
 
   /**
    * Marks given keys to be watched for conditional execution of a transaction
@@ -196,7 +193,7 @@ class TransactionalClient(factory: ServiceFactory[Command, Reply])
     }
 
   def discard(): Future[Unit] =
-    doRequest(Multi) {
+    doRequest(Discard) {
       case StatusReply(message) =>
         _multi = false
         _watch = false

@@ -1,22 +1,21 @@
 package com.twitter.finagle.http
 
-import org.junit.runner.RunWith
 import org.scalatest.FunSuite
-import org.scalatest.junit.JUnitRunner
+import scala.collection.JavaConverters._
 
-@RunWith(classOf[JUnitRunner])
 class RequestTest extends FunSuite {
   test("constructors") {
-    Seq(Request(),
+    Seq(
+      Request(),
       Request(Version.Http11, Method.Get, "/"),
       Request(Method.Get, "/"),
       Request("/"),
       Request("/", "q" -> "twitter"),
       Request("q" -> "twitter")
     ).foreach { request =>
-      assert(request.version    == Version.Http11)
-      assert(request.method     == Method.Get)
-      assert(request.path       == "/")
+      assert(request.version == Version.Http11)
+      assert(request.method == Method.Get)
+      assert(request.path == "/")
     }
   }
 
@@ -39,10 +38,10 @@ class RequestTest extends FunSuite {
       "/1.1/search/tweets" -> "",
       "/1.1/se.arch/tweets" -> "",
       "/1.1/se.arch/tweets.json" -> "json",
-      "/search"      -> "",
-      "/search."     -> "",
-      "/"            -> "",
-      "/."           -> ""
+      "/search" -> "",
+      "/search." -> "",
+      "/" -> "",
+      "/." -> ""
     )
     tests.foreach { case (input, expected) => assert(Request(input).fileExtension == expected) }
   }
@@ -52,47 +51,126 @@ class RequestTest extends FunSuite {
     val response = request.response
 
     assert(response.version == Version.Http11)
-    assert(response.status  == Status.Ok)
+    assert(response.status == Status.Ok)
   }
 
-  test("toHttpString") {
-    val request = Request("/search.json", "q" -> "twitter")
-    request.headers.set("Host", "search.twitter.com")
+  test("uri") {
+    val req = Request("/foo1")
+    assert(req.uri == "/foo1")
 
-    val expected = "GET /search.json?q=twitter HTTP/1.1\r\nHost: search.twitter.com\r\n\r\n"
+    req.uri = "/foo2"
+    assert(req.uri == "/foo2")
 
-    val actual = request.encodeString()
-    assert(actual == expected)
-  }
-
-  test("decode") {
-    val request = Request.decodeString(
-      "GET /search.json?q=twitter HTTP/1.1\r\nHost: search.twitter.com\r\n\r\n")
-    assert(request.path                == "/search.json")
-    assert(request.params("q")         == "twitter")
-    assert(request.headers.get("Host") == "search.twitter.com")
-  }
-
-  test("decodeBytes") {
-    val originalRequest = Request("/", "foo" -> "bar")
-    val bytes = originalRequest.encodeBytes()
-    val decodedRequest = Request.decodeBytes(bytes)
-
-    assert(decodedRequest.path          == "/")
-    assert(decodedRequest.params("foo") == "bar")
+    req.uri("/foo3")
+    assert(req.uri == "/foo3")
   }
 
   test("queryString") {
-    assert(Request.queryString()                                          == "")
-    assert(Request.queryString(Map.empty[String, String])                 == "")
-    assert(Request.queryString("/search.json")                            == "/search.json")
+    assert(Request.queryString() == "")
+    assert(Request.queryString(Map.empty[String, String]) == "")
+    assert(Request.queryString("/search.json") == "/search.json")
     assert(Request.queryString("/search.json", Map.empty[String, String]) == "/search.json")
 
-    assert(Request.queryString("/search.json", "q" -> "twitter")      == "/search.json?q=twitter")
+    assert(Request.queryString("/search.json", "q" -> "twitter") == "/search.json?q=twitter")
     assert(Request.queryString("/search.json", Map("q" -> "twitter")) == "/search.json?q=twitter")
-    assert(Request.queryString("q" -> "twitter")                      == "?q=twitter")
-    assert(Request.queryString(Map("q" -> "twitter"))                 == "?q=twitter")
+    assert(Request.queryString("q" -> "twitter") == "?q=twitter")
+    assert(Request.queryString(Map("q" -> "twitter")) == "?q=twitter")
 
     assert(Request.queryString("q!" -> "twitter!") == "?q%21=twitter%21")
   }
+
+  test("getParam") {
+    val request = Request(Method.Post, "/search")
+    request.mediaType = MediaType.WwwForm
+    request.contentString = "q=twitter"
+    assert(request.getParam("q") == "twitter")
+    assert(request.getParam("r") == null)
+
+    assert(request.getParam("q", "myDefault") == "twitter")
+    assert(request.getParam("r", "myDefault") == "myDefault")
+  }
+
+  test("getShortParam") {
+    val request = Request(Method.Post, "/search")
+    request.mediaType = MediaType.WwwForm
+    request.contentString = "q=10&r=x"
+    assert(request.getShortParam("q") == 10)
+    assert(request.getShortParam("r") == 0)
+    assert(request.getShortParam("s") == 0)
+
+    assert(request.getShortParam("q", 11) == 10)
+    assert(request.getShortParam("r", 11) == 0)
+    assert(request.getShortParam("s", 11) == 11)
+  }
+
+  test("getIntParam") {
+    val request = Request(Method.Post, "/search")
+    request.mediaType = MediaType.WwwForm
+    request.contentString = "q=10&r=x"
+    assert(request.getIntParam("q") == 10)
+    assert(request.getIntParam("r") == 0)
+    assert(request.getIntParam("s") == 0)
+
+    assert(request.getIntParam("q", 11) == 10)
+    assert(request.getIntParam("r", 11) == 0)
+    assert(request.getIntParam("s", 11) == 11)
+  }
+
+  test("getLongParam") {
+    val request = Request(Method.Post, "/search")
+    request.mediaType = MediaType.WwwForm
+    request.contentString = "q=10&r=x"
+    assert(request.getLongParam("q") == 10)
+    assert(request.getLongParam("r") == 0)
+    assert(request.getLongParam("s") == 0)
+
+    assert(request.getLongParam("q", 11) == 10)
+    assert(request.getLongParam("r", 11) == 0)
+    assert(request.getLongParam("s", 11) == 11)
+  }
+
+  test("getBooleanParam") {
+    val request = Request(Method.Post, "/search")
+    request.mediaType = MediaType.WwwForm
+    request.contentString = "q=1&r=x"
+    assert(request.getBooleanParam("q"))
+    assert(!request.getBooleanParam("r"))
+    assert(!request.getBooleanParam("s"))
+
+    assert(request.getBooleanParam("q", true))
+    assert(!request.getBooleanParam("r", true))
+    assert(request.getBooleanParam("s", true))
+  }
+
+  test("getParams") {
+    val request = Request(Method.Post, "/search?r=yes")
+    request.mediaType = MediaType.WwwForm
+    request.contentString = "q=1&r=x"
+
+    val result = request.getParams("r")
+    assert(result == List("x", "yes").asJava)
+
+    val all = request.getParams()
+    assert(all.size == 3)
+  }
+
+  test("containsParam") {
+    val request = Request(Method.Post, "/search?r=yes")
+    request.mediaType = MediaType.WwwForm
+    request.contentString = "q=1&s=x"
+
+    assert(request.containsParam("r"))
+    assert(request.containsParam("s"))
+    assert(!request.containsParam("t"))
+  }
+
+  test("getParamNames") {
+    val request = Request(Method.Post, "/search?r=yes")
+    request.mediaType = MediaType.WwwForm
+    request.contentString = "q=1&s=x"
+
+    val names = request.getParamNames()
+    assert(names.size == 3)
+  }
+
 }

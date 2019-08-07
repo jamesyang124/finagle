@@ -30,22 +30,22 @@ class PoolBench extends StdBenchAnnotations {
   var composed: ServiceFactory[Int, Int] = _
 
   @Setup
-  def loadPools() {
+  def loadPools(): Unit = {
     watermark = new WatermarkPool(underlying, lowWatermark = 1, highWatermark = poolSize)
-    cache = new CachingPool(underlying, poolSize, Duration.Top, DefaultTimer.twitter)
+    cache = new CachingPool(underlying, poolSize, Duration.Top, DefaultTimer)
     buffer = new BufferingPool(underlying, poolSize)
     composed = new WatermarkPool(
       new CachingPool(
         new BufferingPool(underlying, poolSize),
         poolSize,
         Duration.Top,
-        DefaultTimer.twitter
+        DefaultTimer
       ),
       lowWatermark = 1,
       highWatermark = poolSize
     )
 
-    for (i <- 0 until (poolSize*loadedRatio).toInt) {
+    for (i <- 0 until (poolSize * loadedRatio).toInt) {
       watermark()
       cache()
       buffer()
@@ -71,7 +71,7 @@ class PoolBench extends StdBenchAnnotations {
 class SingletonPoolBench extends StdBenchAnnotations {
   import PoolBench._
 
-  val singleton = new SingletonPool(underlying, NullStatsReceiver)
+  val singleton = new SingletonPool(underlying, true, NullStatsReceiver)
 
   @Benchmark
   def getAndPut(): Unit = Await.result(singleton().flatMap(_.close()))

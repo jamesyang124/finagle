@@ -5,13 +5,9 @@ import com.twitter.finagle.Service
 import com.twitter.util.Future
 import java.util.concurrent.Executor
 import java.util.concurrent.LinkedBlockingQueue
-import org.junit.runner.RunWith
-import org.scalatest.concurrent.{Eventually, IntegrationPatience}
 import org.scalatest.FunSuite
-import org.scalatest.junit.JUnitRunner
 
-@RunWith(classOf[JUnitRunner])
-class PrepareCacheTest extends FunSuite with Eventually with IntegrationPatience {
+class PrepareCacheTest extends FunSuite {
 
   test("cache prepare requests") {
 
@@ -23,7 +19,8 @@ class PrepareCacheTest extends FunSuite with Eventually with IntegrationPatience
       Future.value(PrepareOK(stmtId, 1, 1, 0))
     }
 
-    val cache = Caffeine.newBuilder()
+    val cache = Caffeine
+      .newBuilder()
       .maximumSize(11)
       .executor(new Executor { def execute(r: Runnable) = r.run() })
 
@@ -47,15 +44,12 @@ class PrepareCacheTest extends FunSuite with Eventually with IntegrationPatience
     svc(PrepareRequest("SELECT 11"))
     q.poll()
 
-    eventually {
-      System.gc()
-      assert(q.peek == CloseRequest(stmtId))
-    }
+    assert(q.peek == CloseRequest(stmtId))
 
     q.clear()
 
     // Check that the evicted element is not in cache. Caffeine evicts older
-    // elements first, but its not strictly via an LRU policy. We don't actually
+    // elements first, but it's not strictly via an LRU policy. We don't actually
     // need that guarantee so it's okay to loosely check for an eviction.
     for (i <- 1 to 10) svc(PrepareRequest(s"SELECT $i"))
     assert(!q.isEmpty)

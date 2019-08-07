@@ -4,15 +4,15 @@ import org.junit.runner.RunWith
 import org.scalatest.FunSuite
 import org.scalatest.concurrent.{Eventually, IntegrationPatience}
 import org.scalatest.junit.{AssertionsForJUnit, JUnitRunner}
-import org.scalatest.mock.MockitoSugar
+import org.scalatest.mockito.MockitoSugar
 
 @RunWith(classOf[JUnitRunner])
 class ExitGuardTest
-  extends FunSuite
-  with MockitoSugar
-  with AssertionsForJUnit
-  with Eventually
-  with IntegrationPatience {
+    extends FunSuite
+    with MockitoSugar
+    with AssertionsForJUnit
+    with Eventually
+    with IntegrationPatience {
 
   test("guard creates thread, unguard removes") {
     val name = s"ExitGuardTest-${System.nanoTime}"

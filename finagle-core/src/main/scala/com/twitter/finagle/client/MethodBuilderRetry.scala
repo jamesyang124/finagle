@@ -1,56 +1,101 @@
 package com.twitter.finagle.client
 
-import com.twitter.finagle.{Filter, param}
-import com.twitter.finagle.service.RetryPolicy.RetryableWriteException
-import com.twitter.finagle.service._
-import com.twitter.finagle.stats.StatsReceiver
-import com.twitter.util.{Throw, Try}
+import com.twitter.finagle.{Filter, Service, param}
+import com.twitter.finagle.service.{RequeueFilter, _}
+import com.twitter.finagle.stats.{DenylistStatsReceiver, StatsReceiver}
+import com.twitter.logging.{Level, Logger}
+import com.twitter.util.{Future, Stopwatch, Throw, Try}
 
 /**
- * '''Experimental:''' This API is under construction.
- *
- * Retries are intended to help clients improve success rate by trying
- * failed requests additional times. Care must be taken by developers
- * to only retry when they are known to be safe to issue the request multiple
- * times. This is because the client cannot always be sure what the
- * backend service has done. An example of a request that is safe to
- * retry would be a read-only request.
- *
- * A [[RetryBudget]] is used to prevent retries from overwhelming
- * the backend service. The budget is shared across clients created from
- * an initial [[MethodBuilder]]. As such, even if the retry rules
- * deem the request retryable, it may not be retried if there is insufficient
- * budget.
- *
- * Finagle will automatically retry failures that are known to be safe
- * to retry via [[RequeueFilter]]. This includes
- * [[com.twitter.finagle.WriteException WriteExceptions]] and
- * [[com.twitter.finagle.Failure.Restartable retryable nacks]]. As these should have
- * already been retried, we avoid retrying them again by ignoring them at this layer.
- *
- * Additional information regarding retries can be found in the
- * [[https://twitter.github.io/finagle/guide/Clients.html#retries user guide]].
- *
- * @see [[MethodBuilder.withRetry]]
+ * @see [[BaseMethodBuilder]]
  */
-private[finagle] class MethodBuilderRetry[Req, Rep] private[client] (
-    mb: MethodBuilder[Req, Rep]) {
+private[finagle] class MethodBuilderRetry[Req, Rep] private[client] (mb: MethodBuilder[Req, Rep]) {
+
+  import MethodBuilderRetry._
 
   /**
-   * Retry based on [[ResponseClassifier]].
-   *
-   * @param classifier when a [[ResponseClass.Failed Failed]] with `retryable`
-   *                   is `true` is returned for a given `ReqRep`, the
-   *                   request will be retried.
-   *                   This is often [[ResponseClass.RetryableFailure]].
-   *
-   * @see [[forResponse]]
-   * @see [[forRequestResponse]]
+   * @see [[BaseMethodBuilder.withRetryForClassifier]]
    */
-  def forClassifier(
+  def forClassifier(classifier: ResponseClassifier): MethodBuilder[Req, Rep] =
+    mb.withConfig(mb.config.copy(retry = Config(Some(classifier))))
+
+  /**
+   * @see [[BaseMethodBuilder.withRetryDisabled]]
+   */
+  def disabled: MethodBuilder[Req, Rep] =
+    forClassifier(Disabled)
+
+  private[client] def filter(scopedStats: StatsReceiver): Filter.TypeAgnostic = {
+    val classifier = mb.config.retry.responseClassifier
+    if (classifier eq Disabled)
+      Filter.TypeAgnostic.Identity
+    else {
+      new Filter.TypeAgnostic {
+        def toFilter[Req1, Rep1]: Filter[Req1, Rep1, Req1, Rep1] = {
+          val retryPolicy = policyForReqRep(shouldRetry[Req1, Rep1](classifier))
+          val withoutRequeues = filteredPolicy(retryPolicy)
+
+          new RetryFilter[Req1, Rep1](
+            withoutRequeues,
+            mb.params[param.HighResTimer].timer,
+            scopedStats,
+            mb.params[Retries.Budget].retryBudget
+          )
+        }
+      }
+    }
+  }
+
+  private[client] def logicalStatsFilter(stats: StatsReceiver): Filter.TypeAgnostic = {
+    val timeUnit = mb.params[StatsFilter.Param].unit
+    StatsFilter.typeAgnostic(
+      new DenylistStatsReceiver(stats.scope(LogicalScope), LogicalStatsDenylistFn),
+      mb.config.retry.responseClassifier,
+      mb.params[param.ExceptionStatsHandler].categorizer,
+      timeUnit,
+      mb.params[StatsFilter.Now].nowOrDefault(timeUnit)
+    )
+  }
+
+  private[client] def logFailuresFilter(
+    clientName: String,
+    methodName: Option[String]
+  ): Filter.TypeAgnostic = new Filter.TypeAgnostic {
+    def toFilter[Req1, Rep1]: Filter[Req1, Rep1, Req1, Rep1] = {
+      val loggerPrefix = "com.twitter.finagle.client.MethodBuilder"
+      val (label, loggerName) = methodName match {
+        case Some(methodName) =>
+          (s"$clientName/$methodName", s"$loggerPrefix.$clientName.$methodName")
+        case None =>
+          (clientName, s"$loggerPrefix.$clientName")
+      }
+      new LogFailuresFilter[Req1, Rep1](
+        Logger.get(loggerName),
+        label,
+        mb.config.retry.responseClassifier,
+        Stopwatch.systemMillis
+      )
+    }
+  }
+
+  private[client] def registryEntries: Iterable[(Seq[String], String)] = {
+    Seq(
+      (Seq("retry"), mb.config.retry.toString)
+    )
+  }
+
+}
+
+private[client] object MethodBuilderRetry {
+  val MaxRetries = 2
+
+  private val Disabled: ResponseClassifier =
+    ResponseClassifier.named("Disabled")(PartialFunction.empty)
+
+  private def shouldRetry[Req, Rep](
     classifier: ResponseClassifier
-  ): MethodBuilder[Req, Rep] = {
-    val shouldRetry = new PartialFunction[(Req, Try[Rep]), Boolean] {
+  ): PartialFunction[(Req, Try[Rep]), Boolean] =
+    new PartialFunction[(Req, Try[Rep]), Boolean] {
       def isDefinedAt(reqRep: (Req, Try[Rep])): Boolean =
         classifier.isDefinedAt(ReqRep(reqRep._1, reqRep._2))
       def apply(reqRep: (Req, Try[Rep])): Boolean =
@@ -59,93 +104,89 @@ private[finagle] class MethodBuilderRetry[Req, Rep] private[client] (
           case _ => false
         }
     }
-    forRequestResponse(shouldRetry)
-  }
 
-  /**
-   * Retry based on responses.
-   *
-   * @param shouldRetry when `true` for a given response,
-   *                    the request will be retried.
-   *
-   * @see [[forRequestResponse]]
-   * @see [[forClassifier]]
-   */
-  def forResponse(
-    shouldRetry: PartialFunction[Try[Rep], Boolean]
-  ): MethodBuilder[Req, Rep] = {
-    val shouldRetryWithReq = new PartialFunction[(Req, Try[Rep]), Boolean] {
-      def isDefinedAt(reqRep: (Req, Try[Rep])): Boolean =
-        shouldRetry.isDefinedAt(reqRep._2)
-      def apply(reqRep: (Req, Try[Rep])): Boolean =
-        shouldRetry(reqRep._2)
-    }
-    forRequestResponse(shouldRetryWithReq)
-  }
-
-  /**
-   * Retry based on the request and response.
-   *
-   * @param shouldRetry when `true` for a given request and response,
-   *                    the request will be retried.
-   *
-   * @see [[forResponse]]
-   * @see [[forClassifier]]
-   */
-  def forRequestResponse(
+  private def policyForReqRep[Req, Rep](
     shouldRetry: PartialFunction[(Req, Try[Rep]), Boolean]
-  ): MethodBuilder[Req, Rep] = {
-    val policy = RetryPolicy.tries(
+  ): RetryPolicy[(Req, Try[Rep])] =
+    RetryPolicy.tries(
       MethodBuilderRetry.MaxRetries + 1, // add 1 for the initial request
-      shouldRetry)
-    forPolicy(policy)
-  }
+      shouldRetry
+    )
 
-  /**
-   * '''Expert API:''' For most users, the other retry configuration
-   * APIs should suffice as they provide good defaults.
-   *
-   * Retry based on a [[RetryPolicy]].
-   *
-   * @see [[forResponse]]
-   * @see [[forRequestResponse]]
-   * @see [[forClassifier]]
-   */
-  def forPolicy(
+  private def isDefined(retryPolicy: RetryPolicy[_]): Boolean =
+    retryPolicy != RetryPolicy.none
+
+  private def filteredPolicy[Req, Rep](
     retryPolicy: RetryPolicy[(Req, Try[Rep])]
-  ): MethodBuilder[Req, Rep] = {
-    val withoutRequeues = retryPolicy.filterEach[(Req, Try[Rep])] {
-      // rely on finagle to handle these in the RequeueFilter
-      // and avoid retrying them again.
-      case (_, Throw(RetryableWriteException(_))) => false
-      case _ => true
+  ): RetryPolicy[(Req, Try[Rep])] =
+    if (!isDefined(retryPolicy))
+      retryPolicy
+    else
+      retryPolicy.filterEach[(Req, Try[Rep])] {
+        // rely on finagle to handle these in the RequeueFilter
+        // and avoid retrying them again.
+        case (_, Throw(RequeueFilter.Requeueable(_))) => false
+        case _ => true
+      }
+
+  private[client] class LogFailuresFilter[Req, Rep](
+    logger: Logger,
+    label: String,
+    responseClassifier: ResponseClassifier,
+    nowMs: () => Long)
+      extends Filter[Req, Rep, Req, Rep] {
+
+    def apply(request: Req, service: Service[Req, Rep]): Future[Rep] = {
+      val start = nowMs()
+      service(request).respond { response =>
+        val reqRep = ReqRep(request, response)
+        responseClassifier.applyOrElse(reqRep, ResponseClassifier.Default) match {
+          case ResponseClass.Failed(_) => log(start, request, response)
+          case _ => // don't log successful responses
+        }
+      }
     }
-    val retries = mb.config.retries.copy(retryPolicy = withoutRequeues)
-    mb.withConfig(mb.config.copy(retries = retries))
+
+    private[this] def log(startMs: Long, request: Req, response: Try[Rep]): Unit = {
+      if (logger.isLoggable(Level.DEBUG)) {
+        val elapsedMs = nowMs() - startMs
+        val exception = response match {
+          case Throw(e) => e
+          case _ => null // note: nulls are allowed/ignored in this logging API
+        }
+        val msg = s"Request failed for $label, elapsed=$elapsedMs ms"
+        if (logger.isLoggable(Level.TRACE)) {
+          logger.trace(exception, s"$msg (request=$request, response=$response)")
+        } else {
+          logger.debug(exception, msg)
+        }
+      }
+    }
   }
 
-  private[client] def filter(
-    scopedStats: StatsReceiver
-  ): Filter[Req, Rep, Req, Rep] = {
-    val config = mb.config.retries
-    if (config.retryPolicy == RetryPolicy.none)
-      Filter.identity[Req, Rep]
-    else new RetryFilter[Req, Rep](
-      config.retryPolicy,
-      mb.params[param.HighResTimer].timer,
-      scopedStats,
-      mb.params[Retries.Budget].retryBudget)
+  /** The stats scope used for logical success rate. */
+  private val LogicalScope = "logical"
+
+  // the `StatsReceiver` used is already scoped to `$clientName/$methodName/logical`.
+  // this omits the pending gauge as well as sourcedfailures details.
+  private val LogicalStatsDenylistFn: Seq[String] => Boolean = { segments =>
+    val head = segments.head
+    if (head == "pending" || head == "sourcedfailures") {
+      true
+    } else {
+      false
+    }
   }
-
-}
-
-private[client] object MethodBuilderRetry {
-  val MaxRetries = 2
 
   /**
-   * @param retryPolicy which req/rep pairs should be retried
+   * @see [[MethodBuilderRetry.forClassifier]] for details on how the
+   *     classifier is used.
    */
-  case class Config[Req, Rep](
-      retryPolicy: RetryPolicy[(Req, Try[Rep])] = RetryPolicy.none)
+  case class Config(underlyingClassifier: Option[ResponseClassifier]) {
+    def responseClassifier: ResponseClassifier = underlyingClassifier match {
+      case Some(classifier) => classifier
+      case None => ResponseClassifier.Default
+    }
+  }
 
 }

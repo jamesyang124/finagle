@@ -1,13 +1,13 @@
 package com.twitter.finagle.serverset2
 
-import com.twitter.conversions.time._
+import com.twitter.conversions.DurationOps._
 import com.twitter.finagle.service.Backoff
 import com.twitter.util.Duration
 
 /**
-  * Infinite stream of retry durations. Every call to `next` advances the
-  * stream where a call to `reset` moves the stream back to its initial value.
-  */
+ * Infinite stream of retry durations. Every call to `next` advances the
+ * stream where a call to `reset` moves the stream back to its initial value.
+ */
 object RetryStream {
 
   val DefaultStream = Backoff.decorrelatedJittered(10.milliseconds, 10.seconds)

@@ -1,42 +1,48 @@
 package com.twitter.finagle.client
 
-import com.twitter.conversions.time._
+import com.twitter.conversions.DurationOps._
 import com.twitter.finagle._
 import com.twitter.finagle.param.HighResTimer
 import com.twitter.finagle.service.{Retries, RetryPolicy, TimeoutFilter}
 import com.twitter.finagle.stats.{InMemoryStatsReceiver, NullStatsReceiver}
 import com.twitter.util._
+import com.twitter.util.tunable.Tunable
 import org.junit.runner.RunWith
 import org.scalatest.concurrent.{Eventually, IntegrationPatience}
 import org.scalatest.junit.JUnitRunner
 import org.scalatest.{FunSuite, Matchers}
 
 @RunWith(classOf[JUnitRunner])
-class DynamicTimeoutTest extends FunSuite
-  with Matchers
-  with Eventually
-  with IntegrationPatience {
+class DynamicTimeoutTest extends FunSuite with Matchers with Eventually with IntegrationPatience {
 
   private[this] val timer = new MockTimer()
 
   private def mkSvc(): Service[Int, Int] =
-    Service.mk { _ => Future.never }
+    Service.mk { _ =>
+      Future.never
+    }
 
   private val perReqStack: Stack[ServiceFactory[Int, Int]] = {
     val svc = mkSvc()
     val svcFactory = ServiceFactory.const(svc)
-    DynamicTimeout.perRequestModule[Int, Int]
-      .toStack(Stack.Leaf(Stack.Role("test"), svcFactory))
+    DynamicTimeout
+      .perRequestModule[Int, Int]
+      .toStack(Stack.leaf(Stack.Role("test"), svcFactory))
   }
 
   private val perReqExn = classOf[IndividualRequestTimeoutException]
 
   private val totalExn = classOf[GlobalRequestTimeoutException]
 
-  private def perReqParams(
-    timeout: Duration,
-    compensation: Duration
-  ): Stack.Params = {
+  private def perReqParams(timeout: Duration, compensation: Duration): Stack.Params = {
+    Stack.Params.empty +
+      TimeoutFilter.Param(timeout) +
+      param.Timer(timer) +
+      LatencyCompensation.Compensation(compensation) +
+      param.Stats(NullStatsReceiver)
+  }
+
+  private def perReqParams(timeout: Tunable[Duration], compensation: Duration): Stack.Params = {
     Stack.Params.empty +
       TimeoutFilter.Param(timeout) +
       param.Timer(timer) +
@@ -45,6 +51,14 @@ class DynamicTimeoutTest extends FunSuite
   }
 
   private def totalParams(timeout: Duration): Stack.Params = {
+    Stack.Params.empty +
+      TimeoutFilter.TotalTimeout(timeout) +
+      TimeoutFilter.Param(timeout) +
+      param.Timer(timer) +
+      param.Stats(NullStatsReceiver)
+  }
+
+  private def totalParams(timeout: Tunable[Duration]): Stack.Params = {
     Stack.Params.empty +
       TimeoutFilter.TotalTimeout(timeout) +
       TimeoutFilter.Param(timeout) +
@@ -68,7 +82,8 @@ class DynamicTimeoutTest extends FunSuite
     timer.tick()
     assert(result.isDefined)
 
-    try Await.result(result, 1.second) catch {
+    try Await.result(result, 1.second)
+    catch {
       case ex: RequestTimeoutException =>
         assert(expectedException == ex.getClass)
         ex.getMessage should include(timeout.toString)
@@ -86,6 +101,23 @@ class DynamicTimeoutTest extends FunSuite
     }
   }
 
+  test("per-request module uses default tunable timeout when key not set") {
+    val tunable = Tunable.mutable[Duration]("id", 4.seconds)
+    val params = perReqParams(tunable, Duration.Undefined)
+    val svc = Await.result(perReqStack.make(params).apply(ClientConnection.nil), 5.seconds)
+
+    Time.withCurrentTimeFrozen { tc =>
+      val res1 = svc(1)
+      assertBeforeAndAfterTimeout(res1, 4.seconds, tc, perReqExn)
+
+      // Make sure we're getting the new value once we set the Tunable
+      tunable.set(2.seconds)
+
+      val res2 = svc(1)
+      assertBeforeAndAfterTimeout(res2, 2.seconds, tc, perReqExn)
+    }
+  }
+
   test("totalFilter uses default timeout when key not set") {
     val params = totalParams(4.seconds)
     val svc = DynamicTimeout.totalFilter(params).andThen(mkSvc())
@@ -93,6 +125,23 @@ class DynamicTimeoutTest extends FunSuite
     Time.withCurrentTimeFrozen { tc =>
       val res = svc(1)
       assertBeforeAndAfterTimeout(res, 4.seconds, tc, totalExn)
+    }
+  }
+
+  test("totalFilter uses default tunable timeout when key not set") {
+    val tunable = Tunable.mutable[Duration]("id", 4.seconds)
+    val params = totalParams(tunable)
+    val svc = DynamicTimeout.totalFilter(params).andThen(mkSvc())
+
+    Time.withCurrentTimeFrozen { tc =>
+      val res1 = svc(1)
+      assertBeforeAndAfterTimeout(res1, 4.seconds, tc, totalExn)
+
+      // Make sure we're getting the new value once we set the Tunable
+      tunable.set(2.seconds)
+
+      val res2 = svc(1)
+      assertBeforeAndAfterTimeout(res2, 2.seconds, tc, totalExn)
     }
   }
 
@@ -180,12 +229,14 @@ class DynamicTimeoutTest extends FunSuite
 
     val params =
       totalParams(1500.millis) ++
-      perReqParams(1000.millis, Duration.Undefined) +
-      HighResTimer(timer) +
-      Retries.Policy(retryOnTimeout) +
-      param.Stats(stats)
+        perReqParams(1000.millis, Duration.Undefined) +
+        HighResTimer(timer) +
+        Retries.Policy(retryOnTimeout) +
+        param.Stats(stats)
 
-    val svrSvc = Service.mk { _: Int => new Promise[Int]() }
+    val svrSvc = Service.mk { _: Int =>
+      new Promise[Int]()
+    }
     val svcFactory = ServiceFactory.const(svrSvc)
 
     // build a stack with requests flowing top to bottom (though StackBuilder.push
@@ -194,12 +245,12 @@ class DynamicTimeoutTest extends FunSuite
     //   - Retries
     //   - PerRequestTimeout
     //   - Service
-    val stackBuilder = new StackBuilder[ServiceFactory[Int, Int]](
-      Stack.Leaf(Stack.Role("test"), svcFactory))
+    val stackBuilder =
+      new StackBuilder[ServiceFactory[Int, Int]](Stack.leaf(Stack.Role("test"), svcFactory))
     stackBuilder.push(DynamicTimeout.perRequestModule)
     stackBuilder.push(Retries.moduleWithRetryPolicy)
-    val stackSvc = Await.result(
-      stackBuilder.result.make(params).apply(ClientConnection.nil), 5.seconds)
+    val stackSvc =
+      Await.result(stackBuilder.result.make(params).apply(ClientConnection.nil), 5.seconds)
     val svc = DynamicTimeout.totalFilter(params).andThen(stackSvc)
 
     Time.withCurrentTimeFrozen { tc =>

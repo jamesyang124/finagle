@@ -1,30 +1,35 @@
 package com.twitter.finagle.mux.transport
 
-import com.twitter.finagle.netty4.DirectToHeapInboundHandlerName
-import com.twitter.finagle.netty4.channel.DirectToHeapInboundHandler
-import com.twitter.finagle.netty4.codec.BufCodec
-import io.netty.channel.ChannelPipeline
-import io.netty.handler.codec.{LengthFieldPrepender, LengthFieldBasedFrameDecoder}
+import io.netty.channel.{ChannelHandler, ChannelPipeline}
+import io.netty.handler.codec.{LengthFieldBasedFrameDecoder, LengthFieldPrepender}
+
+private[transport] object Netty4Framer {
+  val MaxFrameLength = 0x7FFFFFFF
+  val LengthFieldOffset = 0
+  val LengthFieldLength = 4
+  val LengthAdjustment = 0
+  val InitialBytesToStrip = 4
+}
 
 /**
  * An implementation of a mux framer using netty4 primitives.
  */
-private[finagle] object Netty4Framer extends (ChannelPipeline => Unit) {
-  private val maxFrameLength = 0x7FFFFFFF
-  private val lengthFieldOffset = 0
-  private val lengthFieldLength = 4
-  private val lengthAdjustment = 0
-  private val initialBytesToStrip = 4
+private[mux] abstract class Netty4Framer extends (ChannelPipeline => Unit) {
+  def bufferManagerName: String
+  def bufferManager: ChannelHandler
 
   def apply(pipeline: ChannelPipeline): Unit = {
-    pipeline.addLast("frameDecoder", new LengthFieldBasedFrameDecoder(
-      maxFrameLength,
-      lengthFieldOffset,
-      lengthFieldLength,
-      lengthAdjustment,
-      initialBytesToStrip))
-    pipeline.addLast("frameEncoder", new LengthFieldPrepender(lengthFieldLength))
-    pipeline.addLast(DirectToHeapInboundHandlerName, DirectToHeapInboundHandler)
-    pipeline.addLast("bufCodec", new BufCodec)
+    pipeline.addLast(
+      "frameDecoder",
+      new LengthFieldBasedFrameDecoder(
+        Netty4Framer.MaxFrameLength,
+        Netty4Framer.LengthFieldOffset,
+        Netty4Framer.LengthFieldLength,
+        Netty4Framer.LengthAdjustment,
+        Netty4Framer.InitialBytesToStrip
+      )
+    )
+    pipeline.addLast("frameEncoder", new LengthFieldPrepender(Netty4Framer.LengthFieldLength))
+    pipeline.addLast(bufferManagerName, bufferManager)
   }
 }

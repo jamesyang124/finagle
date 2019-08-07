@@ -1,7 +1,7 @@
 package com.twitter.finagle.filter
 
 import com.twitter.concurrent.AsyncMeter
-import com.twitter.conversions.time._
+import com.twitter.conversions.DurationOps._
 import com.twitter.finagle.{Failure, Service}
 import com.twitter.util._
 
@@ -11,7 +11,7 @@ import org.junit.runner.RunWith
 import org.mockito.Mockito.when
 import org.scalatest.FunSuite
 import org.scalatest.junit.JUnitRunner
-import org.scalatest.mock.MockitoSugar
+import org.scalatest.mockito.MockitoSugar
 
 @RunWith(classOf[JUnitRunner])
 class RequestMeterFilterTest extends FunSuite with MockitoSugar {

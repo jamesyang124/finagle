@@ -1,6 +1,6 @@
 package com.twitter.finagle.zipkin.core
 
-import org.scalatest.mock.MockitoSugar
+import org.scalatest.mockito.MockitoSugar
 import org.scalatest.FunSuite
 import com.twitter.finagle.tracing.{Annotation, Record, SpanId, TraceId}
 import com.twitter.util.Time
@@ -68,7 +68,7 @@ class SamplerTest extends FunSuite with MockitoSugar {
 
     val sampler = new Sampler
     sampler.setSampleRate(0f)
-    assert(sampler.sampleRecord(Record(traceIdSampled, Time.now, Annotation.ClientSend())))
+    assert(sampler.sampleRecord(Record(traceIdSampled, Time.now, Annotation.ClientSend)))
   }
 
   test("Sampler should sample record if sample is none and sample rate 1") {
@@ -77,6 +77,6 @@ class SamplerTest extends FunSuite with MockitoSugar {
 
     val sampler = new Sampler
     sampler.setSampleRate(1f)
-    assert(sampler.sampleRecord(Record(traceId, Time.now, Annotation.ClientSend())))
+    assert(sampler.sampleRecord(Record(traceId, Time.now, Annotation.ClientSend)))
   }
 }

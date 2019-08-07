@@ -54,7 +54,8 @@ abstract class GenSerialServerDispatcher[Req, Rep, In, Out](trans: Transport[In,
    * transport is closed.
    */
   private[this] def loop(): Future[Unit] = {
-    trans.read()
+    trans
+      .read()
       .flatMap(dispatchAndHandleFn)
       .transform(continueLoopFn)
   }
@@ -68,12 +69,12 @@ abstract class GenSerialServerDispatcher[Req, Rep, In, Out](trans: Transport[In,
       val save = Local.save()
       val dispatched = try {
         Contexts.local.let(RemoteInfo.Upstream.AddressCtx, trans.remoteAddress) {
-          trans.peerCertificate match {
-            case None => dispatch(req, eos)
-            case Some(cert) => Contexts.local.let(Transport.peerCertCtx, cert) {
+          val peerCertificates = trans.context.sslSessionInfo.peerCertificates
+          if (peerCertificates.isEmpty) dispatch(req, eos)
+          else
+            Contexts.local.let(Transport.peerCertCtx, peerCertificates.head) {
               dispatch(req, eos)
             }
-          }
         }
       } finally Local.restore(save)
 
@@ -82,7 +83,7 @@ abstract class GenSerialServerDispatcher[Req, Rep, In, Out](trans: Transport[In,
       // This version of `Future.join` doesn't collect the values from the Futures, but
       // since they are both Future[Unit], we know what the result is and can avoid the
       // overhead of collecting two Units just to throw them away via another flatMap.
-      Future.join(handled::eos::Nil)
+      Future.join(handled :: eos :: Nil)
     } else {
       // must have transitioned from Idle to Closing, by someone else who is
       // responsible for closing the transport
@@ -125,7 +126,7 @@ abstract class GenSerialServerDispatcher[Req, Rep, In, Out](trans: Transport[In,
   protected[dispatch] def isClosing: Boolean = state.get() == Closing
 
   /** Exposed for testing */
-  private[dispatch] def timer: Timer = DefaultTimer.twitter
+  private[dispatch] def timer: Timer = DefaultTimer
 
   // Note: this is racy, but that's inherent in draining (without
   // protocol support). Presumably, half-closing a TCP connection is
@@ -156,10 +157,8 @@ abstract class GenSerialServerDispatcher[Req, Rep, In, Out](trans: Transport[In,
  * Transport errors are considered fatal; the service will be
  * released after any error.
  */
-class SerialServerDispatcher[Req, Rep](
-    trans: Transport[Rep, Req],
-    service: Service[Req, Rep])
-  extends GenSerialServerDispatcher[Req, Rep, Rep, Req](trans) {
+class SerialServerDispatcher[Req, Rep](trans: Transport[Rep, Req], service: Service[Req, Rep])
+    extends GenSerialServerDispatcher[Req, Rep, Rep, Req](trans) {
 
   trans.onClose.ensure {
     service.close()

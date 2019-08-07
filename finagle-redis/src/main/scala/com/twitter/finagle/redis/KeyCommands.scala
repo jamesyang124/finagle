@@ -1,12 +1,14 @@
 package com.twitter.finagle.redis
 
 import java.lang.{Boolean => JBoolean, Long => JLong}
+import java.net.InetSocketAddress
 import com.twitter.finagle.redis.protocol._
 import com.twitter.finagle.redis.util.ReplyFormat
 import com.twitter.io.Buf
-import com.twitter.util.{Future, Time}
+import com.twitter.util.{Duration, Future, Time}
 
 private[redis] trait KeyCommands { self: BaseClient =>
+  import com.twitter.conversions.DurationOps._
 
   /**
    * Removes keys
@@ -27,7 +29,7 @@ private[redis] trait KeyCommands { self: BaseClient =>
   def dump(key: Buf): Future[Option[Buf]] =
     doRequest(Dump(key)) {
       case BulkReply(message) => Future.value(Some(message))
-      case EmptyBulkReply     => Future.None
+      case EmptyBulkReply => Future.None
     }
 
   /**
@@ -72,8 +74,26 @@ private[redis] trait KeyCommands { self: BaseClient =>
   def keys(pattern: Buf): Future[Seq[Buf]] =
     doRequest(Keys(pattern)) {
       case MBulkReply(messages) => Future.value(ReplyFormat.toBuf(messages))
-      case EmptyMBulkReply      => Future.Nil
+      case EmptyMBulkReply => Future.Nil
     }
+
+  /**
+   * Migrates all keys to the destination server
+   * @param destAddr target redis server
+   * @param keys list of keys to be migrated
+   * @param timeout timeout before failing, defaults to 5 seconds
+   * @return unit
+   */
+  def migrate(
+    destAddr: InetSocketAddress,
+    keys: Seq[Buf],
+    timeout: Duration = 5.seconds
+  ): Future[Unit] = {
+    doRequest(Migrate(destAddr, keys, timeout)) {
+      case StatusReply(_) => Future.Unit
+      case ErrorReply(msg) => Future.exception(new ServerError(msg))
+    }
+  }
 
   /**
    * Move key from the currently selected database to the specified destination
@@ -95,7 +115,7 @@ private[redis] trait KeyCommands { self: BaseClient =>
    * @param key, milliseconds
    * @return true if the timeout was set.
    *         false if key does not exist or the timeout could not be set.
-   * @see http://redis.io/commands/pexpire
+   * @see https://redis.io/commands/pexpire
    */
   def pExpire(key: Buf, milliseconds: JLong): Future[JBoolean] =
     doRequest(PExpire(key, milliseconds)) {
@@ -109,7 +129,7 @@ private[redis] trait KeyCommands { self: BaseClient =>
    * @return true if the timeout was set.
    *         false if key does not exist or the timeout could not be set
    *         (see: EXPIRE).
-   * @see http://redis.io/commands/pexpireat
+   * @see https://redis.io/commands/pexpireat
    */
   def pExpireAt(key: Buf, timestamp: JLong): Future[JBoolean] =
     doRequest(PExpireAt(key, Time.fromMilliseconds(timestamp))) {
@@ -127,7 +147,8 @@ private[redis] trait KeyCommands { self: BaseClient =>
   def pTtl(key: Buf): Future[Option[JLong]] =
     doRequest(PTtl(key)) {
       case IntegerReply(n) =>
-        if (n != -1) Future.value(Some(n))
+        // -2 indicates key doesn't exist, -1 is key exists but no ttl set.
+        if (n != -2) Future.value(Some(n))
         else Future.value(None)
     }
 
@@ -139,7 +160,7 @@ private[redis] trait KeyCommands { self: BaseClient =>
   def scans(cursor: JLong, count: Option[JLong], pattern: Option[Buf]): Future[Seq[Buf]] =
     doRequest(Scan(cursor, count, pattern)) {
       case MBulkReply(messages) => Future.value(ReplyFormat.toBuf(messages))
-      case EmptyMBulkReply      => Future.Nil
+      case EmptyMBulkReply => Future.Nil
     }
 
   /**
@@ -153,5 +174,15 @@ private[redis] trait KeyCommands { self: BaseClient =>
       case IntegerReply(n) =>
         if (n != -1) Future.value(Some(n))
         else Future.None
+    }
+
+  /**
+   * Persist a key by removing it's expiration time
+   * @param key
+   * @return 1 if ttl was removed, 0 if key doesn't exist or doesn't have a ttl
+   */
+  def persist(key: Buf): Future[JLong] =
+    doRequest(Persist(key)) {
+      case IntegerReply(n) => Future.value(n)
     }
 }

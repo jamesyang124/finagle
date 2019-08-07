@@ -1,23 +1,58 @@
+# the stringprotocol target doesn't have an sbt analog so
+# don't depend on it in projects which need to support sbt.
+scala_library(
+    name = "stringprotocol",
+    sources = [
+        "com/twitter/finagle/client/utils/StringClient.scala",
+        "com/twitter/finagle/server/utils/StringServer.scala",
+    ],
+    compiler_option_sets = {"fatal_warnings"},
+    dependencies = [
+        "finagle/finagle-core",
+        "finagle/finagle-netty4",
+        "util/util-core",
+        "util/util-stats",
+    ],
+)
+
+scala_library(
+    name = "pushsession-utils",
+    sources = [
+        "com/twitter/finagle/pushsession/utils/DeferredExecutor.scala",
+        "com/twitter/finagle/pushsession/utils/MockChannelHandle.scala",
+        "com/twitter/finagle/pushsession/utils/MockPushSession.scala",
+    ],
+    compiler_option_sets = {"fatal_warnings"},
+    dependencies = [
+        "finagle/finagle-core/src/main/scala",
+    ],
+)
+
 junit_tests(
-  dependencies=[
-    '3rdparty/jvm/junit',
-    '3rdparty/jvm/org/mockito:mockito-all',
-    '3rdparty/jvm/org/scalacheck',
-    '3rdparty/jvm/org/scalatest',
-    'util/util-stats',
-    '3rdparty/jvm/com/github/ben-manes/caffeine:caffeine',
-    '3rdparty/jvm/io/netty:netty',
-    'finagle/finagle-core/src/main/scala:scala',
-    'util/util-app/src/main/scala:scala',
-    'util/util-core/src/main/scala:scala',
-    'util/util-hashing/src/main/scala:scala',
-    'util/util-jvm/src/main/scala:scala',
-    'util/util-logging/src/main/scala:scala',
-    'util/util-registry/src/main/scala:scala',
-  ],
-  sources=rglobs('*.scala'),
-  resources=[
-    'finagle/finagle-core/src/test/resources'
-  ],
-  fatal_warnings=True,
+    sources = rglobs("*.scala"),
+    compiler_option_sets = {"fatal_warnings"},
+    dependencies = [
+        ":pushsession-utils",
+        ":stringprotocol",
+        "3rdparty/jvm/com/github/ben-manes/caffeine",
+        "3rdparty/jvm/io/netty:netty4-codec-http",
+        "3rdparty/jvm/junit",
+        "3rdparty/jvm/org/hdrhistogram",
+        "3rdparty/jvm/org/mockito:mockito-all",
+        "3rdparty/jvm/org/scalacheck",
+        "3rdparty/jvm/org/scalatest",
+        "finagle/finagle-core/src/main/scala",
+        "finagle/finagle-core/src/test/resources",
+        "finagle/finagle-netty4",
+        "finagle/finagle-toggle/src/main/scala",
+        "util/util-app/src/main/scala",
+        "util/util-core/src/main/scala",
+        "util/util-hashing/src/main/scala",
+        "util/util-jvm/src/main/scala",
+        "util/util-lint/src/main/scala",
+        "util/util-logging/src/main/scala",
+        "util/util-registry/src/main/scala",
+        "util/util-stats",
+        "util/util-tunable/src/main/scala",
+    ],
 )

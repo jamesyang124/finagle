@@ -1,15 +1,19 @@
 scala_library(
-  provides = scala_artifact(
-    org = 'com.twitter',
-    name = 'finagle-redis',
-    repo = artifactory,
-  ),
-  dependencies=[
-    'util/util-logging',
-    '3rdparty/jvm/io/netty:netty',
-    'finagle/finagle-core/src/main/scala:scala',
-    'util/util-core/src/main/scala:scala',
-    'util/util-stats/src/main/scala:scala',
-  ],
-  sources=rglobs('*.scala'),
+    sources = rglobs("*.scala"),
+    provides = scala_artifact(
+        org = "com.twitter",
+        name = "finagle-redis",
+        repo = artifactory,
+    ),
+    dependencies = [
+        "finagle/finagle-core",
+        "finagle/finagle-netty4",
+        "util/util-core",
+        "util/util-logging",
+        "util/util-stats",
+    ],
+    exports = [
+        "finagle/finagle-core",
+        "util/util-core",
+    ],
 )

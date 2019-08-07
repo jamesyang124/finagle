@@ -1,6 +1,6 @@
 package com.twitter.finagle.mux.lease.exp
 
-import com.twitter.conversions.time._
+import com.twitter.conversions.DurationOps._
 import com.twitter.util._
 import com.twitter.util.Local.Context
 
@@ -33,16 +33,14 @@ private[lease] trait ByteCounter {
  * running.
  */
 // It might be simpler to just make it an exponential moving average.
-private[lease] class WindowedByteCounter private[lease](
-  val info: JvmInfo,
-  ctx: Context
-) extends Thread("WindowedByteClock") with ByteCounter with Closable {
+private[lease] class WindowedByteCounter private[lease] (val info: JvmInfo, ctx: Context)
+    extends Thread("WindowedByteClock")
+    with ByteCounter
+    with Closable {
 
   import WindowedByteCounter._
 
-  def this(
-    info: JvmInfo
-  ) = this(info, new Context(0))
+  def this(info: JvmInfo) = this(info, Local.Context.empty)
 
   /*
    Should we be conservative wrt. count vs. usage?
@@ -80,17 +78,17 @@ private[lease] class WindowedByteCounter private[lease](
   private[this] def lastRate(): Double = allocs(idx).inBytes / P.inMilliseconds
 
   override def toString =
-    "WindowedByteCounter(windowed="+
-      rate()+"bpms; last="+
-      lastRate()+"bpms; count="+
-      count+"; sum="+
-      sum()+"bytes)"
+    "WindowedByteCounter(windowed=" +
+      rate() + "bpms; last=" +
+      lastRate() + "bpms; count=" +
+      count + "; sum=" +
+      sum() + "bytes)"
 
   /**
    * Measures the amount of bytes used since the last sample, and bumps
    * the collection number if necessary.
    */
-  override def run() {
+  override def run(): Unit = {
     Local.restore(ctx)
     var prevUsed = info.used()
 
@@ -132,7 +130,7 @@ private[lease] class WindowedByteCounter private[lease](
 
 private[lease] object WindowedByteCounter {
   // TODO: W, P could be configurable--for some servers, 100ms may be too slow
-  private[lease] val W = 2000.milliseconds  // window size
-  private[lease] val P = 100.milliseconds  // poll period
-  private[lease] val N = (W.inMilliseconds/P.inMilliseconds).toInt  // # of polls in a window
+  private[lease] val W = 2000.milliseconds // window size
+  private[lease] val P = 100.milliseconds // poll period
+  private[lease] val N = (W.inMilliseconds / P.inMilliseconds).toInt // # of polls in a window
 }

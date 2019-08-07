@@ -4,6 +4,8 @@ import com.twitter.finagle._
 import com.twitter.finagle.http.{Request, Response, Status}
 import com.twitter.finagle.stats.{Counter, Stat, StatsReceiver}
 import com.twitter.util._
+import java.util.concurrent.ConcurrentHashMap
+import java.util.concurrent.atomic.AtomicReferenceArray
 
 object StatsFilter {
   val role: Stack.Role = Stack.Role("HttpStatsFilter")
@@ -11,17 +13,41 @@ object StatsFilter {
 
   def module: Stackable[ServiceFactory[Request, Response]] =
     new Stack.Module1[param.Stats, ServiceFactory[Request, Response]] {
-      val role = StatsFilter.role
-      val description = StatsFilter.description
+      val role: Stack.Role = StatsFilter.role
+      val description: String = StatsFilter.description
 
-      def make(statsParam: param.Stats,
-               next: ServiceFactory[Request, Response]): ServiceFactory[Request, Response] = {
+      def make(
+        statsParam: param.Stats,
+        next: ServiceFactory[Request, Response]
+      ): ServiceFactory[Request, Response] = {
         if (statsParam.statsReceiver.isNull)
           next
         else
           new StatsFilter[Request](statsParam.statsReceiver.scope("http")).andThen(next)
       }
     }
+
+  private def statusCodeRange(code: Int): String =
+    if (code < 100) "UNKNOWN"
+    else if (code < 200) "1XX"
+    else if (code < 300) "2XX"
+    else if (code < 400) "3XX"
+    else if (code < 500) "4XX"
+    else if (code < 600) "5XX"
+    else "UNKNOWN"
+
+  private def getStatusRangeIndex(code: Int): Int =
+    if (code < 100) 0
+    else if (code < 200) 1
+    else if (code < 300) 2
+    else if (code < 400) 3
+    else if (code < 500) 4
+    else if (code < 600) 5
+    else 0
+
+  private val nowTimeInMillis: () => Long = Stopwatch.systemMillis
+
+  private case class StatusStats(count: Counter, latency: Stat)
 
 }
 
@@ -31,48 +57,73 @@ object StatsFilter {
  * Add counters:
  *    status.[code]
  *    status.[class]
- *    response_size (deprecated?)
  * And metrics:
  *    time.[code]
  *    time.[class]
  */
-class StatsFilter[REQUEST <: Request](stats: StatsReceiver)
-  extends SimpleFilter[REQUEST, Response] {
+class StatsFilter[REQUEST <: Request] private[filter] (stats: StatsReceiver, now: () => Long)
+    extends SimpleFilter[REQUEST, Response] {
+
+  import StatsFilter._
+
+  def this(stats: StatsReceiver) = this(stats, StatsFilter.nowTimeInMillis)
 
   private[this] val statusReceiver = stats.scope("status")
   private[this] val timeReceiver = stats.scope("time")
-  private[this] val responseSizeStat = stats.stat("response_size")
 
-  private[this] val counterCache: String => Counter =
-    Memoize(statusReceiver.counter(_))
+  // Optimized for the known valid status code ranges (1xx, 2xx, 3xx, 4xx, 5xx)
+  // where the 0th index represents an unknown/invalid HTTP status range.
+  // We initialize these lazily to prevent unused metrics from being exported.
+  private[this] val statusRange: AtomicReferenceArray[StatusStats] =
+    new AtomicReferenceArray[StatusStats](6)
 
-  private[this] val statCache: String => Stat =
-    Memoize(timeReceiver.stat(_))
+  private[this] def getStatusRange(code: Int): StatusStats = {
+    val index = getStatusRangeIndex(code)
+    val statsPair = statusRange.get(index)
+    if (statsPair == null) {
+      val codeRange = statusCodeRange(code)
+      val initPair = StatusStats(statusReceiver.counter(codeRange), timeReceiver.stat(codeRange))
+      statusRange.compareAndSet(index, null, initPair)
+      initPair
+    } else {
+      statsPair
+    }
+  }
+
+  private[this] val statusCache = new ConcurrentHashMap[Int, StatusStats]()
+  private[this] val statusCacheFn = new java.util.function.Function[Int, StatusStats] {
+    def apply(t: Int): StatusStats = {
+      val statusCode = t.toString
+      StatusStats(statusReceiver.counter(statusCode), timeReceiver.stat(statusCode))
+    }
+  }
 
   def apply(request: REQUEST, service: Service[REQUEST, Response]): Future[Response] = {
-    val elapsed = Stopwatch.start()
+    val start = now()
+
     val future = service(request)
     future respond {
       case Return(response) =>
-        count(elapsed(), response)
+        count(now() - start, response)
       case Throw(_) =>
         // Treat exceptions as empty 500 errors
         val response = Response(request.version, Status.InternalServerError)
-        count(elapsed(), response)
+        count(now() - start, response)
     }
     future
   }
 
-  protected def count(duration: Duration, response: Response) {
-    val statusCode = response.statusCode.toString
-    val statusClass = (response.statusCode / 100).toString + "XX"
+  private[this] def count(durationMs: Long, response: Response): Unit = {
+    val statusCode = response.statusCode
 
-    counterCache(statusCode).incr()
-    counterCache(statusClass).incr()
+    // we don't use a named pair to avoid extra allocation here
+    // ex: `val (counter, stat) = getStatusRange(statusCode)`
+    val rangeStats = getStatusRange(statusCode)
+    rangeStats.count.incr()
+    rangeStats.latency.add(durationMs)
 
-    statCache(statusCode).add(duration.inMilliseconds)
-    statCache(statusClass).add(duration.inMilliseconds)
-
-    responseSizeStat.add(response.length)
+    val codeStats = statusCache.computeIfAbsent(statusCode, statusCacheFn)
+    codeStats.count.incr()
+    codeStats.latency.add(durationMs)
   }
 }

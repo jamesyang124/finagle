@@ -10,7 +10,7 @@ import scala.collection.immutable
  * name. An object may be replicated, and thus bound to multiple
  * physical locations (see [[com.twitter.finagle.Address]]).
  *
- * @see The [[http://twitter.github.io/finagle/guide/Names.html#addr user guide]]
+ * @see The [[https://twitter.github.io/finagle/guide/Names.html#addr user guide]]
  *      for further details.
  */
 sealed trait Addr
@@ -23,7 +23,7 @@ object Addr {
   /** Address metadata */
   type Metadata = Map[String, Any]
   object Metadata {
-    def apply(pairs: (String, Any)*): Metadata = Map(pairs:_*)
+    def apply(pairs: (String, Any)*): Metadata = Map(pairs: _*)
     val empty: Metadata = Map.empty
   }
 
@@ -39,10 +39,7 @@ object Addr {
    * from access since we want to add partially resolved addresses
    * in the future. At this point, the API will be fixed.
    */
-  case class Bound(
-    addrs: immutable.Set[Address],
-    metadata: Metadata
-  ) extends Addr
+  case class Bound(addrs: immutable.Set[Address], metadata: Metadata) extends Addr
 
   /**
    * The address is failed: binding failed with
@@ -66,7 +63,7 @@ object Addr {
 
   object Bound {
     @varargs
-    def apply(addrs: Address*): Addr = Bound(Set(addrs:_*), Metadata.empty)
+    def apply(addrs: Address*): Addr = Bound(Set(addrs: _*), Metadata.empty)
 
     def apply(addrs: Set[Address]): Addr = Bound(addrs, Metadata.empty)
   }

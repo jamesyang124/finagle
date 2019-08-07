@@ -2,19 +2,20 @@ package com.twitter.finagle.http
 
 /**
  * Represents the HTTP version.
- *
- * For Java-friendly enums, see [[com.twitter.finagle.http.Versions]].
  */
-sealed abstract class Version
+final case class Version private (major: Int, minor: Int) {
+
+  /** String representation of the HTTP version */
+  val versionString: String = s"HTTP/${major}.${minor}"
+
+  override def toString: String = versionString
+}
 
 object Version {
+
   /** HTTP 1.0 */
-  case object Http10 extends Version {
-    override def toString: String = "HTTP/1.0"
-  }
+  val Http10: Version = Version(1, 0)
 
   /** HTTP 1.1 */
-  case object Http11 extends Version {
-    override def toString: String = "HTTP/1.1"
-  }
+  val Http11: Version = Version(1, 1)
 }

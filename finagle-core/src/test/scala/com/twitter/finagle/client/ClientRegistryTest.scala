@@ -1,17 +1,16 @@
 package com.twitter.finagle.client
 
 import com.twitter.finagle._
+import com.twitter.finagle.client.utils.StringClient
 import com.twitter.finagle.stats.InMemoryStatsReceiver
 import com.twitter.finagle.util.{TestParam, TestParam2}
 import com.twitter.util._
-import com.twitter.util.registry.{GlobalRegistry, SimpleRegistry, Entry}
-import org.junit.runner.RunWith
+import com.twitter.util.registry.{Entry, GlobalRegistry, SimpleRegistry}
 import org.mockito.Matchers.anyObject
 import org.mockito.Mockito.when
 import org.scalatest.{BeforeAndAfter, FunSuite}
 import org.scalatest.concurrent.{Eventually, IntegrationPatience}
-import org.scalatest.junit.JUnitRunner
-import org.scalatest.mock.MockitoSugar
+import org.scalatest.mockito.MockitoSugar
 
 object crtnamer {
   @volatile var observationsOpened = 0
@@ -35,17 +34,16 @@ class crtnamer extends Namer {
   }
 }
 
-@RunWith(classOf[JUnitRunner])
-class ClientRegistryTest extends FunSuite
-  with StringClient
-  with Eventually
-  with IntegrationPatience
-  with BeforeAndAfter
-  with MockitoSugar {
+class ClientRegistryTest
+    extends FunSuite
+    with Eventually
+    with IntegrationPatience
+    with BeforeAndAfter
+    with MockitoSugar {
 
   trait Ctx {
     val sr = new InMemoryStatsReceiver
-    val stackClient = stringClient
+    val stackClient = StringClient.client
       .configured(param.Stats(sr))
       .configured(param.ProtocolLibrary("fancy"))
   }
@@ -54,21 +52,15 @@ class ClientRegistryTest extends FunSuite
     ClientRegistry.clear()
   }
 
-  test("ClientRegistry.expAllRegisteredClientsResolved zero clients")(new Ctx {
-    val allResolved0 = ClientRegistry.expAllRegisteredClientsResolved()
-    assert(allResolved0.poll == Some(Return(Set())))
-  })
-
   test("ClientRegistry.expAllRegisteredClientsResolved handles Addr.Bound")(new Ctx {
     val va = Var[Addr](Addr.Pending)
 
     val c = stackClient.newClient(Name.Bound(va, new Object()), "foo")
     val allResolved = ClientRegistry.expAllRegisteredClientsResolved()
-    assert(allResolved.poll == None)
 
     va() = Addr.Bound(Set.empty[Address])
     eventually {
-      assert(allResolved.poll == Some(Return(Set("foo"))))
+      assert(allResolved.poll.get.get().contains("foo"))
     }
   })
 
@@ -77,11 +69,10 @@ class ClientRegistryTest extends FunSuite
 
     val c = stackClient.newClient(Name.Bound(va, new Object()), "foo")
     val allResolved = ClientRegistry.expAllRegisteredClientsResolved()
-    assert(allResolved.poll == None)
 
     va() = Addr.Failed(new Exception("foo"))
     eventually {
-      assert(allResolved.poll == Some(Return(Set("foo"))))
+      assert(allResolved.poll.get.get().contains("foo"))
     }
   })
 
@@ -90,11 +81,10 @@ class ClientRegistryTest extends FunSuite
 
     val c = stackClient.newClient(Name.Bound(va, new Object()), "foo")
     val allResolved = ClientRegistry.expAllRegisteredClientsResolved()
-    assert(allResolved.poll == None)
 
     va() = Addr.Neg
     eventually {
-      assert(allResolved.poll == Some(Return(Set("foo"))))
+      assert(allResolved.poll.get.get().contains("foo"))
     }
   })
 
@@ -104,19 +94,18 @@ class ClientRegistryTest extends FunSuite
 
     val c0 = stackClient.newClient(Name.Bound(va0, new Object()), "foo")
     val allResolved0 = ClientRegistry.expAllRegisteredClientsResolved()
-    assert(allResolved0.poll == None)
     va0() = Addr.Bound(Set.empty[Address])
     eventually {
-      assert(allResolved0.poll == Some(Return(Set("foo"))))
+      assert(allResolved0.poll.get.get.contains("foo"))
     }
 
     val c1 = stackClient.newClient(Name.Bound(va1, new Object()), "bar")
     val allResolved1 = ClientRegistry.expAllRegisteredClientsResolved()
-    assert(allResolved1.poll == None)
     va1() = Addr.Bound(Set.empty[Address])
 
     eventually {
-      assert(allResolved1.poll == Some(Return(Set("foo", "bar"))))
+      val res = allResolved1.poll.get.get
+      assert(res.contains("foo") && res.contains("bar"))
     }
   })
 
@@ -124,10 +113,9 @@ class ClientRegistryTest extends FunSuite
     val path = Path.read("/$/com.twitter.finagle.client.crtnamer/foo")
     val c = stackClient.newClient(Name.Path(path), "foo")
     val allResolved = ClientRegistry.expAllRegisteredClientsResolved()
-    assert(allResolved.poll == None)
     crtnamer.e.notify(Addr.Bound(Set.empty[Address]))
     eventually {
-      assert(allResolved.poll == Some(Return(Set("foo"))))
+      assert(allResolved.poll.get.get().contains("foo"))
     }
     c.close()
   })
@@ -151,7 +139,8 @@ class ClientRegistryTest extends FunSuite
     val simple = new SimpleRegistry
     GlobalRegistry.withRegistry(simple) {
       val c = stackClient.newClient(Name.Path(path), "foo")
-      val prefix = Seq("client", "fancy", "foo", "/$/com.twitter.finagle.client.crtnamer/foo", "Pool")
+      val prefix =
+        Seq("client", "fancy", "foo", "/$/com.twitter.finagle.client.crtnamer/foo", "Pool")
       val filtered = GlobalRegistry.get.toSet.filter { e =>
         e.key.startsWith(prefix)
       }
@@ -174,24 +163,27 @@ class ClientRegistryTest extends FunSuite
 
   val param1 = TestParam(999)
 
-
   def newStack(): Stack[ServiceFactory[Int, Int]] = {
     val mockSvc = mock[Service[Int, Int]]
     when(mockSvc.apply(anyObject[Int])).thenReturn(Future.value(10))
+    when(mockSvc.close(anyObject[Time])).thenReturn(Future.Done)
 
     val factory = ServiceFactory.const(mockSvc)
 
-    val stack = new StackBuilder(Stack.Leaf(new Stack.Head {
+    val stack = new StackBuilder(Stack.leaf(new Stack.Head {
       def role: Stack.Role = headRole
       def description: String = "the head!!"
       def parameters: Seq[Stack.Param[_]] = Seq(TestParam2.param)
     }, factory))
-    val stackable: Stackable[ServiceFactory[Int, Int]] = new Stack.Module1[TestParam, ServiceFactory[Int, Int]] {
-      def make(p: TestParam, l: ServiceFactory[Int, Int]): ServiceFactory[Int, Int] = l.map { _.map { _ + p.p1 }}
+    val stackable: Stackable[ServiceFactory[Int, Int]] =
+      new Stack.Module1[TestParam, ServiceFactory[Int, Int]] {
+        def make(p: TestParam, l: ServiceFactory[Int, Int]): ServiceFactory[Int, Int] = l.map {
+          _.map { _ + p.p1 }
+        }
 
-      val description: String = "description"
-      val role: Stack.Role = nameRole
-    }
+        val description: String = "description"
+        val role: Stack.Role = nameRole
+      }
     stack.push(stackable)
 
     stack.result
@@ -229,7 +221,6 @@ class ClientRegistryTest extends FunSuite
     assert(ClientRegistry.registeredDuplicates(0).addr == "second")
     assert(ClientRegistry.registeredDuplicates(1).name == "foo")
     assert(ClientRegistry.registeredDuplicates(1).addr == "/$/fail")
-
 
     factory.close()
 

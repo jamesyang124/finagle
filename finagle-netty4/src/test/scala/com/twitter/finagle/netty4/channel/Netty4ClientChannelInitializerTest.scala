@@ -1,7 +1,10 @@
 package com.twitter.finagle.netty4.channel
 
-import com.twitter.conversions.time._
+import com.twitter.conversions.DurationOps._
+import com.twitter.finagle.Stack
 import com.twitter.finagle.Stack.Params
+import com.twitter.finagle.client.Transporter
+import com.twitter.finagle.netty4.proxy.Netty4ProxyConnectHandler
 import com.twitter.util.{Await, Promise}
 import io.netty.buffer.{ByteBuf, Unpooled}
 import io.netty.channel._
@@ -9,11 +12,10 @@ import io.netty.channel.embedded.EmbeddedChannel
 import io.netty.channel.nio.NioEventLoopGroup
 import io.netty.channel.socket.SocketChannel
 import io.netty.channel.socket.nio.NioSocketChannel
-import org.junit.runner.RunWith
+import io.netty.handler.proxy.ProxyConnectException
+import java.net.InetSocketAddress
 import org.scalatest.FunSuite
-import org.scalatest.junit.JUnitRunner
 
-@RunWith(classOf[JUnitRunner])
 class Netty4ClientChannelInitializerTest extends FunSuite {
 
   test("framed channel initializer releases direct bufs") {
@@ -31,20 +33,22 @@ class Netty4ClientChannelInitializerTest extends FunSuite {
 
   test("raw channel initializer exposes netty pipeline") {
     val reverser = new ChannelOutboundHandlerAdapter {
-      override def write(ctx: ChannelHandlerContext, msg: Any, promise: ChannelPromise): Unit = msg match {
-        case b: ByteBuf =>
-          val bytes = new Array[Byte](b.readableBytes)
-          b.readBytes(bytes)
-          val reversed = Unpooled.wrappedBuffer(bytes.reverse)
-          super.write(ctx, reversed, promise)
-        case _ => fail("expected ByteBuf message")
-      }
+      override def write(ctx: ChannelHandlerContext, msg: Any, promise: ChannelPromise): Unit =
+        msg match {
+          case b: ByteBuf =>
+            val bytes = new Array[Byte](b.readableBytes)
+            b.readBytes(bytes)
+            val reversed = Unpooled.wrappedBuffer(bytes.reverse)
+            super.write(ctx, reversed, promise)
+          case _ => fail("expected ByteBuf message")
+        }
     }
 
     val init =
       new RawNetty4ClientChannelInitializer(
         pipelineInit = _.addLast(reverser),
-        params = Params.empty)
+        params = Params.empty
+      )
 
     val channel: SocketChannel = new NioSocketChannel()
     val loop = new NioEventLoopGroup()
@@ -53,7 +57,11 @@ class Netty4ClientChannelInitializerTest extends FunSuite {
 
     val msgSeen = new Promise[ByteBuf]
     channel.pipeline.addFirst(new ChannelOutboundHandlerAdapter {
-      override def write(ctx: ChannelHandlerContext, msg: scala.Any, promise: ChannelPromise): Unit = msg match {
+      override def write(
+        ctx: ChannelHandlerContext,
+        msg: scala.Any,
+        promise: ChannelPromise
+      ): Unit = msg match {
         case b: ByteBuf => msgSeen.setValue(b)
         case _ => fail("expected ByteBuf message")
       }
@@ -65,5 +73,26 @@ class Netty4ClientChannelInitializerTest extends FunSuite {
     val seen = new Array[Byte](3)
     Await.result(msgSeen, 5.seconds).readBytes(seen)
     assert(seen.toList == bytes.reverse.toList)
+  }
+
+  test("abstract channel initializer bypasses SOCKS5 proxied connections to localhost") {
+    val proxyParams = Stack.Params.empty +
+      Transporter.SocksProxy(Some(new InetSocketAddress(0)), None)
+    val init = new AbstractNetty4ClientChannelInitializer(proxyParams) {}
+    val e = new EmbeddedChannel(init)
+    e.connect(new InetSocketAddress("localhost", 12345))
+    assert(e.pipeline.get(classOf[Netty4ProxyConnectHandler]) == null)
+    assert(!e.finish())
+  }
+
+  test(
+    "abstract channel initializer doesn't bypass SOCKS5 proxied connections to localhost when asked not to") {
+    val proxyParams = Stack.Params.empty +
+      Transporter.SocksProxy(Some(new InetSocketAddress(0)), None, false)
+    val init = new AbstractNetty4ClientChannelInitializer(proxyParams) {}
+    val e = new EmbeddedChannel(init)
+    e.connect(new InetSocketAddress("localhost", 12345))
+    assert(e.pipeline.get(classOf[Netty4ProxyConnectHandler]) != null)
+    assertThrows[ProxyConnectException](e.finish())
   }
 }

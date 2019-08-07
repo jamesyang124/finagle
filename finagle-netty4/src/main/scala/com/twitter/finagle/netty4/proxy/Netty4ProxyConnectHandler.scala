@@ -1,12 +1,16 @@
 package com.twitter.finagle.netty4.proxy
 
-import com.twitter.finagle.netty4.channel.{ConnectPromiseDelayListeners, BufferingChannelOutboundHandler}
+import com.twitter.finagle.ProxyConnectException
+import com.twitter.finagle.netty4.channel.ConnectPromiseDelayListeners._
 import io.netty.channel.{
-  Channel, ChannelFuture, ChannelFutureListener,
-  ChannelPromise, ChannelHandlerContext, ChannelOutboundHandlerAdapter}
+  Channel,
+  ChannelHandlerContext,
+  ChannelOutboundHandlerAdapter,
+  ChannelPromise
+}
 import io.netty.handler.proxy.ProxyHandler
-import io.netty.util.concurrent.{Future => NettyFuture, GenericFutureListener}
-import java.net.SocketAddress
+import io.netty.util.concurrent.{GenericFutureListener, Future => NettyFuture}
+import java.net.{InetSocketAddress, SocketAddress}
 
 /**
  * An internal handler that upgrades the pipeline to delay connect-promise satisfaction until the
@@ -19,25 +23,61 @@ import java.net.SocketAddress
  * is designed and implemented exclusively for testing/development, not for production usage.
  *
  * For production traffic, an HTTP proxy (see [[HttpProxyConnectHandler]]) should be used instead.
+ *
+ * @note This handler doesn't buffer any writes assuming that this is done by [[ProxyHandler]] that
+ *       is placed before.
  */
 private[netty4] class Netty4ProxyConnectHandler(
-    proxyHandler: ProxyHandler)
-  extends ChannelOutboundHandlerAdapter
-  with BufferingChannelOutboundHandler
-  with ConnectPromiseDelayListeners { self =>
+  proxyHandler: ProxyHandler,
+  bypassLocalhostConnections: Boolean = false)
+    extends ChannelOutboundHandlerAdapter { self =>
 
-  private[this] val proxyCodecKey: String = "proxy codec"
-  private[proxy] var connectPromise: NettyFuture[Channel] = _ // exposed for testing
+  private[this] final val proxyCodecKey: String = "netty4ProxyCodec"
 
-  override def handlerAdded(ctx: ChannelHandlerContext): Unit = {
-    connectPromise = proxyHandler.connectFuture()
+  private[this] final def shouldBypassProxy(isa: InetSocketAddress): Boolean =
+    bypassLocalhostConnections && !isa.isUnresolved &&
+      (isa.getAddress.isLoopbackAddress || isa.getAddress.isLinkLocalAddress)
+
+  private[this] final def connectThroughProxy(
+    ctx: ChannelHandlerContext,
+    remote: SocketAddress,
+    local: SocketAddress,
+    promise: ChannelPromise
+  ): Unit = {
+    // Upgrade the pipeline with the proxy codec pieces.
     ctx.pipeline().addBefore(ctx.name(), proxyCodecKey, proxyHandler)
-    super.handlerAdded(ctx)
-  }
 
-  override def handlerRemoved(ctx: ChannelHandlerContext): Unit = {
-    ctx.pipeline().remove(proxyCodecKey)
-    super.handlerRemoved(ctx)
+    val proxyConnectPromise = ctx.newPromise()
+
+    // Cancel new promise if an original one is canceled.
+    // NOTE: We don't worry about cancelling/failing pending writes here since it will happen
+    // automatically on channel closure.
+    promise.addListener(proxyCancellationsTo(proxyConnectPromise, ctx))
+
+    // Fail the original promise if a new one is failed.
+    // NOTE: If the connect request fails the channel was never active. Since no
+    // writes are expected from the previous handler, no need to fail the pending writes.
+    proxyConnectPromise.addListener(proxyFailuresTo(promise))
+
+    // React on satisfied proxy handshake promise.
+    proxyHandler.connectFuture.addListener(new GenericFutureListener[NettyFuture[Channel]] {
+      override def operationComplete(future: NettyFuture[Channel]): Unit = {
+        if (future.isSuccess) {
+          ctx.pipeline().remove(proxyCodecKey)
+          ctx.pipeline().remove(self)
+
+          promise.trySuccess()
+        } else {
+          // SOCKS/HTTP proxy handshake promise is failed so given `ProxyHandler` is going to
+          // close the channel and fail pending writes, we only need to fail the connect promise.
+          promise.tryFailure(
+            new ProxyConnectException(future.cause().getMessage, ctx.channel().remoteAddress())
+          )
+        }
+      }
+    })
+
+    ctx.connect(remote, local, proxyConnectPromise)
   }
 
   override def connect(
@@ -45,47 +85,22 @@ private[netty4] class Netty4ProxyConnectHandler(
     remote: SocketAddress,
     local: SocketAddress,
     promise: ChannelPromise
-  ): Unit = {
-    val proxyConnectPromise = ctx.newPromise()
+  ): Unit = remote match {
+    case isa: InetSocketAddress if shouldBypassProxy(isa) =>
+      // We're bypassing proxies for any localhost connections.
+      ctx.pipeline().remove(self)
+      ctx.connect(remote, local, promise)
 
-    // Cancel new promise if an original one is canceled.
-    promise.addListener(proxyCancellationsTo(proxyConnectPromise, ctx))
+    case isa: InetSocketAddress if !isa.isUnresolved =>
+      // We're replacing resolved InetSocketAddress with unresolved one such that
+      // Netty's `HttpProxyHandler` will prefer hostname over the IP address as a destination
+      // for a proxy server. This is a safer way to do HTTP proxy handshakes since not
+      // all HTTP proxy servers allow for IP addresses to be passed as destinations/host headers.
+      val unresolvedRemote = InetSocketAddress.createUnresolved(isa.getHostName, isa.getPort)
+      connectThroughProxy(ctx, unresolvedRemote, local, promise)
 
-    // Fail the original promise if a new one is failed.
-    proxyConnectPromise.addListener(proxyFailuresTo(promise))
-
-    // Workaround for https://github.com/netty/netty/issues/5933 (CSL-3451)
-    // If ChannelOption.AUTO_READ is turned off, as it is by default for
-    // Netty4 via the com.twitter.finagle.netty4.Netty4Transporter.Backpressure
-    // param, as of Netty 4.1.4, the read of the Socks 5 proxy server is not
-    // kicked off and so must be done manually.
-    proxyConnectPromise.addListener(new ChannelFutureListener {
-      def operationComplete(f: ChannelFuture): Unit = {
-        if (f.isSuccess && !ctx.channel().config().isAutoRead())
-          ctx.read()
-      }
-    })
-
-    // React on satisfied proxy handshake promise.
-    connectPromise.addListener(new GenericFutureListener[NettyFuture[Channel]] {
-      override def operationComplete(future: NettyFuture[Channel]): Unit = {
-        if (future.isSuccess) {
-          // We "try" because it might be already cancelled and we don't need to handle
-          // cancellations here - it's already done by `proxyCancellationsTo`.
-          // Same thing about `tryFailure` below.
-          if (promise.trySuccess()) {
-            ctx.pipeline().remove(self) // drains pending writes when removed
-          }
-        } else {
-          // SOCKS/HTTP proxy handshake promise is failed so given `ProxyHandler` is going to
-          // close the channel, we only need to fail pending writes and the connect promise.
-          promise.tryFailure(future.cause())
-          failPendingWrites(ctx, future.cause())
-        }
-      }
-    })
-
-    ctx.connect(remote, local, proxyConnectPromise)
+    case _ =>
+      connectThroughProxy(ctx, remote, local, promise)
   }
 
   // We don't override either `exceptionCaught` or `channelInactive` here since `ProxyHandler`

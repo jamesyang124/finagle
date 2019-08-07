@@ -1,6 +1,6 @@
 package com.twitter.finagle
 
-import com.twitter.conversions.time._
+import com.twitter.conversions.DurationOps._
 import com.twitter.util.{Await, Return}
 import org.junit.runner.RunWith
 import org.scalacheck.Gen
@@ -11,11 +11,11 @@ import org.scalatest.prop.GeneratorDrivenPropertyChecks
 
 @RunWith(classOf[JUnitRunner])
 class StatusTest
-  extends FunSuite
-  with AssertionsForJUnit
-  with GeneratorDrivenPropertyChecks
-  with Eventually
-  with IntegrationPatience {
+    extends FunSuite
+    with AssertionsForJUnit
+    with GeneratorDrivenPropertyChecks
+    with Eventually
+    with IntegrationPatience {
 
   val status1 = Gen.oneOf(Status.Open, Status.Busy, Status.Closed)
   val status2 = for (left <- status1; right <- status1) yield (left, right)
@@ -38,17 +38,19 @@ class StatusTest
 
   // This test is borderline silly.
   test("Status.worst") {
-    forAll(status2) { case (left, right) =>
-      val s = Status.worst(left, right)
-      assert(Ordering[Status].equiv(left, right) || s == Ordering[Status].min(left, right))
+    forAll(status2) {
+      case (left, right) =>
+        val s = Status.worst(left, right)
+        assert(Ordering[Status].equiv(left, right) || s == Ordering[Status].min(left, right))
     }
   }
 
   // This test is borderline silly.
   test("Status.best") {
-    forAll(status2) { case (left, right) =>
-      val s = Status.best(left, right)
-      assert(Ordering[Status].equiv(left, right) || s == Ordering[Status].max(left, right))
+    forAll(status2) {
+      case (left, right) =>
+        val s = Status.best(left, right)
+        assert(Ordering[Status].equiv(left, right) || s == Ordering[Status].max(left, right))
     }
   }
 
@@ -60,7 +62,7 @@ class StatusTest
 
     status = Status.Open
     eventually { assert(open.poll == Some(Return.Unit)) }
-    Await.result(open, 5.seconds)  // no exceptions
+    Await.result(open, 5.seconds) // no exceptions
   }
 
   test("Status.whenOpen - closes") {
@@ -76,11 +78,14 @@ class StatusTest
 
   test("Ordering spot check") {
     val ord = Array(Status.Closed, Status.Busy, Status.Open)
-    val idx2 = for { left <- Gen.choose(0, ord.length-1);
-      right <- Gen.choose(0, ord.length-1) } yield (left, right)
+    val idx2 = for {
+      left <- Gen.choose(0, ord.length - 1)
+      right <- Gen.choose(0, ord.length - 1)
+    } yield (left, right)
 
-    forAll(idx2) { case (left, right) =>
-      assert(Ordering[Status].compare(ord(left), ord(right)).signum == (left - right).signum)
+    forAll(idx2) {
+      case (left, right) =>
+        assert(Ordering[Status].compare(ord(left), ord(right)).signum == (left - right).signum)
     }
   }
 }

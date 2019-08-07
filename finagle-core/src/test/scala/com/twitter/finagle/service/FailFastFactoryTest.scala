@@ -1,6 +1,6 @@
 package com.twitter.finagle.service
 
-import com.twitter.conversions.time._
+import com.twitter.conversions.DurationOps._
 import com.twitter.finagle.stats.InMemoryStatsReceiver
 import com.twitter.finagle.{FailedFastException, Service, ServiceFactory, SourcedException, Status}
 import com.twitter.util._
@@ -11,14 +11,15 @@ import org.mockito.Mockito.{never, times, verify, when}
 import org.scalatest.FunSuite
 import org.scalatest.concurrent.{Conductors, IntegrationPatience}
 import org.scalatest.junit.JUnitRunner
-import org.scalatest.mock.MockitoSugar
+import org.scalatest.mockito.MockitoSugar
 import scala.language.reflectiveCalls
 
 @RunWith(classOf[JUnitRunner])
-class FailFastFactoryTest extends FunSuite
-  with MockitoSugar
-  with Conductors
-  with IntegrationPatience {
+class FailFastFactoryTest
+    extends FunSuite
+    with MockitoSugar
+    with Conductors
+    with IntegrationPatience {
 
   def newCtx() = new {
     val timer = new MockTimer
@@ -35,7 +36,7 @@ class FailFastFactoryTest extends FunSuite
     val p, q, r = new Promise[Service[Int, Int]]
     when(underlying()).thenReturn(p)
     val pp = failfast()
-    assert(pp.isDefined == false)
+    assert(!pp.isDefined)
     assert(failfast.isAvailable)
     assert(timer.tasks.isEmpty)
   }
@@ -46,7 +47,7 @@ class FailFastFactoryTest extends FunSuite
       import ctx._
 
       p() = Return(service)
-      assert(pp.poll == Some(Return(service)))
+      assert(pp.poll.contains(Return(service)))
     }
   }
 
@@ -55,10 +56,14 @@ class FailFastFactoryTest extends FunSuite
       val ctx = newCtx()
       import ctx._
 
-      p() = Throw(new Exception)
-      verify(underlying).apply()
+      val e = new Exception("boom")
+      p() = Throw(e)
+      val f = verify(underlying).apply()
+
+      assert(failfast().poll.map(_.throwable.getCause).contains(e))
       assert(!failfast.isAvailable)
-      assert(stats.counters.get(Seq("marked_dead")) == Some(1))
+      assert(stats.counters.get(Seq("marked_dead")).contains(1))
+      assert(stats.gauges(Seq("is_marked_dead"))() == 1)
     }
   }
 
@@ -85,6 +90,8 @@ class FailFastFactoryTest extends FunSuite
       tc.set(timer.tasks(0).when)
       when(underlying()).thenReturn(q)
       verify(underlying).apply()
+      assert(stats.counters.get(Seq("marked_dead")).contains(1))
+      assert(stats.gauges(Seq("is_marked_dead"))() == 1)
       timer.tick()
       verify(underlying, times(2)).apply()
       assert(timer.tasks.isEmpty)
@@ -92,6 +99,7 @@ class FailFastFactoryTest extends FunSuite
       assert(timer.tasks.isEmpty)
       assert(failfast.isAvailable)
       assert(stats.counters.get(Seq("marked_available")) == Some(1))
+      assert(stats.gauges(Seq("is_marked_dead"))() == 0)
     }
   }
 

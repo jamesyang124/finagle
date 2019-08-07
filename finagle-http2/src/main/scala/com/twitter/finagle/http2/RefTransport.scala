@@ -12,15 +12,16 @@ import com.twitter.util.{Future, Time}
  * this remains true, even though the details of how that connection behaves may
  * change when the underlying transport changes.
  */
-class RefTransport[In, Out](
-    underlying: Transport[In, Out])
-  extends TransportProxy[In, Out](underlying) {
+class RefTransport[In, Out](underlying: Transport[In, Out])
+    extends TransportProxy[In, Out](underlying) {
 
   @volatile private[this] var mapped = underlying
-  private[this] var closing = false
+  private[this] var closeDeadline: Option[Time] = None
   onClose.ensure {
     synchronized {
-      closing = true
+      if (closeDeadline.isEmpty) {
+        closeDeadline = Some(Time.Top)
+      }
     }
   }
 
@@ -40,19 +41,22 @@ class RefTransport[In, Out](
    *         otherwise
    */
   def update(fn: Transport[In, Out] => Transport[In, Out]): Boolean = synchronized {
-    if (!closing) {
-      mapped = fn(underlying)
-      true
-    } else false
+    mapped = fn(underlying)
+    closeDeadline match {
+      case Some(deadline) =>
+        mapped.close(deadline)
+        false
+      case _ => true
+    }
   }
 
   /**
-   * Closes the underlying transport, and prevents future updates to the
+   * Closes the mapped transport, and prevents future updates to the
    * underlying transport.
    */
   override def close(deadline: Time): Future[Unit] = synchronized {
     // prevents further transformations
-    closing = true
+    closeDeadline = Some(deadline)
     mapped.close(deadline)
   }
   override def status: Status = mapped.status

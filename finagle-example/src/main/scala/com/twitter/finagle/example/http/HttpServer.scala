@@ -1,8 +1,7 @@
 package com.twitter.finagle.example.http
 
-import com.twitter.finagle.builder.{Server, ServerBuilder}
-import com.twitter.finagle.http._
-import com.twitter.finagle.{Service, SimpleFilter}
+import com.twitter.finagle.http.{Request, Response, Status, Version, Fields}
+import com.twitter.finagle.{Http, ListeningServer, Service, SimpleFilter}
 import com.twitter.util.Future
 import java.net.InetSocketAddress
 
@@ -13,6 +12,7 @@ import java.net.InetSocketAddress
  * the main service (here called "Respond") for better code organization.
  */
 object HttpServer {
+
   /**
    * A simple Filter that catches exceptions and converts them to appropriate
    * HTTP responses.
@@ -21,17 +21,18 @@ object HttpServer {
     def apply(request: Request, service: Service[Request, Response]) = {
 
       // `handle` asynchronously handles exceptions.
-      service(request) handle { case error =>
-        val statusCode = error match {
-          case _: IllegalArgumentException =>
-            Status.Forbidden
-          case _ =>
-            Status.InternalServerError
-        }
-        val errorResponse = Response(Version.Http11, statusCode)
-        errorResponse.contentString = error.getStackTrace.mkString("\n")
+      service(request) handle {
+        case error =>
+          val statusCode = error match {
+            case _: IllegalArgumentException =>
+              Status.Forbidden
+            case _ =>
+              Status.InternalServerError
+          }
+          val errorResponse = Response(Version.Http11, statusCode)
+          errorResponse.contentString = error.getStackTrace.mkString("\n")
 
-        errorResponse
+          errorResponse
       }
     }
   }
@@ -61,7 +62,7 @@ object HttpServer {
     }
   }
 
-  def main(args: Array[String]) {
+  def main(args: Array[String]): Unit = {
     val handleExceptions = new HandleExceptions
     val authorize = new Authorize
     val respond = new Respond
@@ -69,10 +70,7 @@ object HttpServer {
     // compose the Filters and Service together:
     val myService: Service[Request, Response] = handleExceptions andThen authorize andThen respond
 
-    val server: Server = ServerBuilder()
-      .codec(Http())
-      .bindTo(new InetSocketAddress(8080))
-      .name("httpserver")
-      .build(myService)
+    val server: ListeningServer =
+      Http.server.withLabel("httpserver").serve(new InetSocketAddress(8080), myService)
   }
 }

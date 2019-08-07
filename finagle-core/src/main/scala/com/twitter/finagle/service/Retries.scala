@@ -52,19 +52,41 @@ object Retries {
    *       requests using a [[RetryPolicy]]
    */
   case class Budget(
-      retryBudget: RetryBudget,
-      requeueBackoffs: Stream[Duration] = Budget.emptyBackoffSchedule) {
+    retryBudget: RetryBudget,
+    requeueBackoffs: Stream[Duration] = Budget.emptyBackoffSchedule) {
     def this(retryBudget: RetryBudget) =
       this(retryBudget, Budget.emptyBackoffSchedule)
 
     def mk(): (Budget, Stack.Param[Budget]) =
       (this, Budget)
+
+    def canEqual(other: Any): Boolean = other.isInstanceOf[Budget]
+
+    /**
+     * The equals method only compares the retryBudget field of this instance,
+     * since the requeueBackoffs Stream[Duration] is possibly infinite,
+     * resulting in an infinite computation to compare for equality.
+     */
+    override def equals(other: Any): Boolean = other match {
+      case that: Budget =>
+        that.canEqual(this) && retryBudget == that.retryBudget
+      case _ => false
+    }
+
+    /**
+     * For the hashCode of this class we only take into account the hashCode of the RetryBudget field.
+     * The requeueBackoffs Stream[Duration] is possibly infinite,
+     * resulting in an infinite computation to get to the hashCode.
+     */
+    override def hashCode(): Int =
+      retryBudget.##
   }
 
   object Budget extends Stack.Param[Budget] {
+
     /**
      * Default backoff stream to use for automatic retries.
-     * All Zero's.
+     * All Zeros.
      */
     val emptyBackoffSchedule = Backoff.constant(Duration.Zero)
 
@@ -92,29 +114,46 @@ object Retries {
    * Retries failures that are guaranteed to be safe to retry
    * (see [[RetryPolicy.RetryableWriteException]]).
    */
-  private[finagle] def moduleRequeueable[Req, Rep]: Stackable[ServiceFactory[Req, Rep]] =
-    new Stack.Module3[Stats, Budget, HighResTimer, ServiceFactory[Req, Rep]] {
+  def moduleRequeueable[Req, Rep]: Stackable[ServiceFactory[Req, Rep]] =
+    new Stack.Module[ServiceFactory[Req, Rep]] {
       def role: Stack.Role = Retries.Role
 
       def description: String =
         "Retries requests, at the service application level, that have been rejected"
 
+      val parameters = Seq(
+        implicitly[Stack.Param[Stats]],
+        implicitly[Stack.Param[Budget]],
+        implicitly[Stack.Param[HighResTimer]]
+      )
+
       def make(
-        statsP: param.Stats,
-        budgetP: Budget,
-        timerP: HighResTimer,
-        next: ServiceFactory[Req, Rep]
-      ): ServiceFactory[Req, Rep] = {
-        val statsRecv = statsP.statsReceiver
+        params: Stack.Params,
+        next: Stack[ServiceFactory[Req, Rep]]
+      ): Stack[ServiceFactory[Req, Rep]] = {
+        val statsRecv = params[Stats].statsReceiver
         val scoped = statsRecv.scope("retries")
         val requeues = scoped.counter("requeues")
-        val retryBudget = budgetP.retryBudget
-        val timer = timerP.timer
+        val budget = params[Budget]
+        val timer = params[HighResTimer].timer
+
+        // Filters/factories lower in the stack may also make use of the [[RetryBudget]] param.
+        // However, if this param is not configured explicitly, the default is used, which creates
+        // a new, unshared [[RetryBudget]]. In order to have a per-client budget shared across
+        // retry modules and all modules lower in the stack, we explicitly configure the param
+        // here.
+        val nextSvcFac = next.make(params + budget)
 
         val filters = newRequeueFilter(
-          retryBudget, budgetP.requeueBackoffs, withdrawsOnly = false, scoped, timer, next
+          budget.retryBudget,
+          budget.requeueBackoffs,
+          withdrawsOnly = false,
+          scoped,
+          timer,
+          nextSvcFac
         )
-        svcFactory(retryBudget, filters, scoped, requeues, next)
+
+        Stack.leaf(this, svcFactory(budget.retryBudget, filters, scoped, requeues, nextSvcFac))
       }
     }
 
@@ -159,13 +198,25 @@ object Retries {
 
         val filters =
           if (retryPolicy eq RetryPolicy.Never) {
-            newRequeueFilter(retryBudget, budgetP.requeueBackoffs, withdrawsOnly = false, scoped, timerP.timer, next)
+            newRequeueFilter(
+              retryBudget,
+              budgetP.requeueBackoffs,
+              withdrawsOnly = false,
+              scoped,
+              timerP.timer,
+              next
+            )
           } else {
-            val retryFilter = new RetryExceptionsFilter[Req, Rep](
-              retryPolicy, timerP.timer, statsRecv, retryBudget)
+            val retryFilter =
+              new RetryExceptionsFilter[Req, Rep](retryPolicy, timerP.timer, statsRecv, retryBudget)
             // note that we wrap the budget, since the retry filter wraps this
             val requeueFilter = newRequeueFilter(
-              retryBudget, budgetP.requeueBackoffs, withdrawsOnly = true, scoped, timerP.timer, next
+              retryBudget,
+              budgetP.requeueBackoffs,
+              withdrawsOnly = true,
+              scoped,
+              timerP.timer,
+              next
             )
             retryFilter.andThen(requeueFilter)
           }
@@ -193,7 +244,8 @@ object Retries {
       // failures when it isn't Open, we wouldn't need to gate on status.
       () => next.status == Status.Open,
       MaxRequeuesPerReq,
-      timer)
+      timer
+    )
   }
 
   private[this] def svcFactory[Req, Rep](
@@ -222,25 +274,38 @@ object Retries {
        * some exceptions to acquire a service are considered fatal.
        */
       private[this] def applySelf(conn: ClientConnection, n: Int): Future[Service[Req, Rep]] =
-        self(conn).rescue {
-          case e@RetryPolicy.RetryableWriteException(_) if n > 0 =>
+        self(conn).transform {
+          case Throw(e @ RetryPolicy.RetryableWriteException(_)) if n > 0 =>
             if (status == Status.Open) {
               requeuesCounter.incr()
-              applySelf(conn, n-1)
+              applySelf(conn, n - 1)
             } else {
               notOpenCounter.incr()
               Future.exception(e)
             }
+
+          // this indicates that there isn't a problem with the remote peer but
+          // the returned service is unusable, which allows a protocol
+          // to point out when a connection is dead for a reason that shouldn't
+          // trigger circuit breaking
+          case Return(deadSvc) if deadSvc.status == Status.Closed && n > 0 =>
+            // Since we're stopping `deadSvc` from propagating up the stack to either an application
+            // or FactoryToService wrapper and since it's not part of the Service contract that Status
+            // can only be Closed when the close method was called, we must manually close the session
+            // to forestall resource leaks.
+            deadSvc.close()
+            requeuesCounter.incr()
+            applySelf(conn, n - 1)
+          case t => Future.const(t)
         }
 
       /**
-       * Note: This may seem like we are always attempting service acquisition
-       * with a fixed budget (i.e. `Effort`). However, this is not always the case
-       * and is dependent on how the client is built (i.e. `newService`/`newClient`).
+       * Note: We attempt service acquisition with a fixed budget (i.e. `Effort`).
        *
-       * Clients built with `newService` compose FactoryToService as part of their stack
-       * which effectively moves service acquisition as part of service application,
-       * so all requeues are gated by [[RequeueFilter]].
+       * Clients built with `newService` compose `FactoryToService` as part of their stack,
+       * making service acquisition part of *each* service application,
+       * so we requeue service acquisition up to `Effort` times for each service application,
+       * followed by request requeues as per [[RequeueFilter]].
        *
        * Clients built with `newClient` separate requeues into two distinct phases for
        * service acquisition and service application. First, we try up to `Effort` to acquire

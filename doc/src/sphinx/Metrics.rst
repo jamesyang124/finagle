@@ -4,8 +4,14 @@ Metrics
 This section aims to be a comprehensive list of all of the metrics that Finagle
 exposes. The metrics are organized by layer and then by class.
 
-Some of the stats are only for clients, some only for servers, and some are for both.
-Some stats are only visible when certain optional classes are used.
+Finagle leverages `verbosity levels`_ and defines some of its low-utility metrics as "debug".
+Unless explicitly stated, assume ``Verbosity.Default`` is used to define a given metric.
+
+.. NOTE::
+
+   Some of the metrics are only for clients, some only for servers, and some are for both.
+
+   Some metrics are only visible when certain optional classes are used.
 
 NB: Finagle sometimes uses ``RollupStatsReceivers`` internally, which will take
 stats like "failures/twitter/TimeoutException" and roll them up, aggregating
@@ -71,7 +77,7 @@ Failure Accrual
 .. _failure_accrual_stats:
 
 The client stats under the `failure_accrual` scope track how
-:src:`FailureAccrualFactory <com/twitter/finagle/service/FailureAccrualFactory.scala>`
+:src:`FailureAccrualFactory <com/twitter/finagle/liveness/FailureAccrualFactory.scala>`
 manages failures.
 
 .. include:: metrics/FailureAccrual.rst
@@ -104,6 +110,16 @@ These client stats help you keep track of connection churn.
 
 .. include:: metrics/Pooling.rst
 
+PendingRequestFilter
+--------------------
+
+.. _pending_request_filter:
+
+These stats represent information about the behavior of PendingRequestFilter.
+
+**pending_requests/rejected**
+  A counter of the number of requests that have been rejected by this filter.
+
 Retries
 -------
 
@@ -111,24 +127,81 @@ Retries
 
 .. include:: metrics/Retries.rst
 
+Backup Requests
+---------------
+
+.. _backup_requests:
+
+These stats provide information on the state and behavior of
+`com.twitter.finagle.client.BackupRequestFilter`.
+
+**backups/send_backup_after_ms**
+  A histogram of the time, in  milliseconds, after which a request will be re-issued if it has
+  not yet completed.
+
+**backups/backups_sent**
+  A counter of the number of backup requests sent.
+
+**backups/backups_won**
+  A counter of the number of backup requests that completed before the original, regardless of
+  whether they succeeded.
+
+**backups/budget_exhausted**
+  A counter of the number of times the backup request budget (computed using the current value
+  of the `maxExtraLoad` param) or client retry budget was exhausted, preventing a backup from being
+  sent.
+
 Dispatching
 -----------
 
 .. _dispatching:
 
-Metrics scoped under `dispatcher` represent information about a client's dispatching
-layer.
+The client metrics scoped under `dispatcher` represent information about a
+client's dispatching layer.
 
 Depending on the underlying protocol, dispatchers may have different request
 queueing rules.
 
 **serial/queue_size**
-  a gauge used by serial dispatchers that can only have a single request
+  A gauge used by serial dispatchers that can only have a single request
   per connection at a time that represents the number of pending requests.
 
-**pipelining/pending**
-  a gauge used by pipelining dispatchers that represents how many
-  pipelined requests are currently outstanding.
+
+Server Thread Usage
+-------------------
+
+.. _threadusage:
+
+Metrics scoped under "thread_usage/requests" can be used as a signal for
+seeing if your connections or threads are imbalanced on a server.
+
+There are caveats which can make these metrics unreliable or not applicable:
+
+- Work is done on a ``FuturePool`` instead of the server's thread.
+- The amount of work done per request is highly inconsistent.
+- Low number of requests.
+
+**relative_stddev**
+  A gauge of the relative standard deviation, or coefficient of variation, for
+  the number of requests handled by each thread. Put another way, the closer this
+  is to 0.0 the less variance there is in the number of requests handled per thread.
+
+  If this value is large, before taking action, you may want to first verify the metric
+  by looking at the node's thread utilization. Examples include `mpstat -P ALL`
+  and `top -p $pid -H`. You may also want to look at the debug metrics for
+  "mean" and "stdev" to help quantify the amount of imbalance. One solution to
+  mitigate imbalance is to move work to a ``FuturePool``.
+
+**mean** `verbosity:debug`
+  A gauge of the arithemetic mean, or average, of the number of requests handled
+  by each thread.
+
+**stddev** `verbosity:debug`
+  A gauge of the standard of deviation of the number of requests handled
+  by each thread.
+
+**per_thread/<thread_name>** `verbosity:debug`
+ A counter which indicates the number of requests that a specific thread has received.
 
 Admission Control
 -----------------
@@ -151,6 +224,13 @@ protocol.
 
 .. include:: metrics/FailureDetector.rst
 
+Method Builder
+--------------
+
+Client metrics that are created when using :ref:`MethodBuilder <methodbuilder>`.
+
+.. include:: metrics/MethodBuilder.rst
+
 Transport
 ---------
 
@@ -172,6 +252,13 @@ These metrics track the state of name resolution and service discovery.
 
 .. include:: metrics/ServiceDiscovery.rst
 
+JVM
+---
+
+.. _jvm_metrics:
+
+.. include:: metrics/Jvm.rst
+
 Toggles
 -------
 
@@ -180,6 +267,13 @@ These metrics correspond to :ref:`feature toggles <toggles>`.
 **toggles/<libraryName>/checksum**
   A gauge summarizing the current state of a `ToggleMap` which may be useful
   for comparing state across a cluster or over time.
+
+Streaming
+---------
+
+.. _streaming_metrics:
+
+.. include:: metrics/Streaming.rst
 
 HTTP
 ----
@@ -195,8 +289,27 @@ These stats pertain to the HTTP protocol.
   A counter of the number of non-retryable HTTP 503 responses the HTTP server returns. Those
   responses are not automatically retried.
 
+**Deprecated: stream/failures/<exception_name>**
+  The replacement is `stream/request/failures/<exception_name>` and `stream/response/failures/<exception_name>`.
+  A counter of the number of times a specific exception has been thrown in the middle of a stream.
+
+**Deprecated: stream/failures**
+  The replacement is `stream/request/failures` and `stream/response/failures`.
+  A counter of the number of times any failure has been observed in the middle of a stream.
+
+**http/cookie/samesite_failures** `verbosity:debug`
+  A counter of the number of failed attempts to decode the SameSite Cookie attribute.
+
+**rejected_invalid_header_names**
+  A counter of the number of rejected requests by a server due to an invalid (as seen by RFC-7230)
+  header name.
+
+**rejected_invalid_header_values**
+  A counter of the number of rejected requests by a server due to an invalid (as seen by RFC-7230)
+  header value.
+
 These metrics are added by
-:src:`StatsFilter <com/twitter/finagle/http/filter/StatsFilter.scala>` and can be enabled by
+:finagle-http-src:`StatsFilter <com/twitter/finagle/http/filter/StatsFilter.scala>` and can be enabled by
 using `.withHttpStats` on `Http.Client` and `Http.Server`.
 
 **status/<statusCode>**
@@ -213,6 +326,21 @@ using `.withHttpStats` on `Http.Client` and `Http.Server`.
 **time/<statusCategory>**
   A histogram on duration in milliseconds per HTTP status code category.
 
+HTTP2
+-----
+These stats pertain to HTTP2 only.
+
+.. include:: metrics/Http2.rst
+
+Memcached
+---------
+
+.. _memcached_stats:
+
+These stats pertain to the Memcached protocol.
+
+.. include:: metrics/Memcached.rst
+
 Mux
 ---
 
@@ -222,6 +350,15 @@ These stats pertain to the :ref:`Mux <mux>` protocol.
 
 .. include:: metrics/Mux.rst
 
+Mysql
+-----
+
+.. _mysql_stats
+
+These stats pertain to the finagle-mysql implementation.
+
+.. include:: metrics/Mysql.rst
+
 ThriftMux
 ---------
 
@@ -230,3 +367,10 @@ ThriftMux
 These stats pertain to the :ref:`ThriftMux <whats_thriftmux>` protocol.
 
 .. include:: metrics/ThriftMux.rst
+
+.. _verbosity levels: https://twitter.github.io/util/guide/util-stats/basics.html#verbosity-levels
+
+
+PerEndpoint StatsFilter
+-----------------------
+.. include:: metrics/PerEndpoint.rst

@@ -2,8 +2,7 @@ package com.twitter.finagle.service
 
 import com.twitter.util.{Future, Closable, Time}
 import com.twitter.hashing._
-import com.twitter.finagle.{
-  Service, Status, NotShardableException, ShardNotAvailableException}
+import com.twitter.finagle.{Service, Status, NotShardableException, ShardNotAvailableException}
 
 /**
  * ShardingService takes a `Distributor` where the handle is a service.
@@ -19,26 +18,25 @@ import com.twitter.finagle.{
  *   val service = serviceFactory()
  *   service(req) // where req is a Req and may have ShardableRequest mixed in
  */
-
 class ShardingService[Req, Rep](
   distributor: Distributor[Service[Req, Rep]],
-  hash: Req => Option[Long]
-) extends Service[Req, Rep] {
+  hash: Req => Option[Long])
+    extends Service[Req, Rep] {
 
   def apply(request: Req): Future[Rep] = {
     hash(request) map { hash =>
-        val shard = distributor.nodeForHash(hash)
-        // TODO: a sharding service may consider fine-grained statuses.
-        if (shard.status != Status.Closed)
-          shard(request)
-        else
-          Future.exception(ShardingService.ShardNotAvailableException)
-    } getOrElse(Future.exception(ShardingService.NotShardableException))
+      val shard = distributor.nodeForHash(hash)
+      // TODO: a sharding service may consider fine-grained statuses.
+      if (shard.status != Status.Closed)
+        shard(request)
+      else
+        Future.exception(ShardingService.ShardNotAvailableException)
+    } getOrElse (Future.exception(ShardingService.NotShardableException))
   }
 
   override def status: Status = Status.bestOf[Service[Req, Rep]](distributor.nodes, _.status)
   override def close(deadline: Time) =
-    Closable.all(distributor.nodes:_*).close(deadline)
+    Closable.all(distributor.nodes: _*).close(deadline)
 }
 
 private[service] object ShardingService {
@@ -47,13 +45,12 @@ private[service] object ShardingService {
 }
 
 case class KetamaShardingServiceBuilder[Req, Rep](
-  _nodes: Option[Seq[KetamaNode[Service[Req, Rep]]]] = None,
-  _hash: Option[Req => Option[Long]] = None,
-  _numReps: Int = 160
-) {
+  _nodes: Option[Seq[KetamaNode[Service[Req, Rep]]]] = None: None.type,
+  _hash: Option[Req => Option[Long]] = None: None.type,
+  _numReps: Int = 160) {
 
   def nodesAndWeights(nodes: Seq[(String, Int, Service[Req, Rep])]) = {
-    copy(_nodes = Some(nodes map Function.tupled { KetamaNode(_,_,_) }))
+    copy(_nodes = Some(nodes map Function.tupled { KetamaNode(_, _, _) }))
   }
 
   def nodes(services: Seq[(String, Service[Req, Rep])]) = {

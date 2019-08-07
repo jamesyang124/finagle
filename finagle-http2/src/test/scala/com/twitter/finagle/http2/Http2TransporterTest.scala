@@ -1,251 +1,298 @@
 package com.twitter.finagle.http2
 
-import com.twitter.conversions.time._
-import com.twitter.finagle.Status
+import com.twitter.conversions.DurationOps._
+import com.twitter.finagle.{Stack, Status}
 import com.twitter.finagle.client.Transporter
-import com.twitter.finagle.http2.transport.Http2ClientDowngrader
-import com.twitter.finagle.transport.{Transport, TransportProxy}
-import com.twitter.util.{Await, Duration, Future, Time, Promise}
-import io.netty.handler.codec.http.{DefaultFullHttpResponse, HttpVersion,
-  HttpResponseStatus, HttpResponse}
-import java.net.{SocketAddress, InetSocketAddress}
-import java.security.cert.Certificate
-import io.netty.handler.codec.http.HttpClientUpgradeHandler.UpgradeEvent
-import org.junit.runner.RunWith
+import com.twitter.finagle.http2.transport.{ClientSession, Http2UpgradingTransport}
+import com.twitter.finagle.http2.transport.Http2UpgradingTransport._
+import com.twitter.finagle.transport.{Transport, TransportContext}
+import com.twitter.util.{Await, Duration, Future, MockTimer, Promise}
+import io.netty.handler.codec.http._
+import org.mockito.Mockito._
+import org.mockito.Matchers._
 import org.scalatest.FunSuite
-import org.scalatest.junit.JUnitRunner
-import scala.language.reflectiveCalls
+import org.scalatest.mockito.MockitoSugar
 
-@RunWith(classOf[JUnitRunner])
-class Http2TransporterTest extends FunSuite {
+class Http2TransporterTest extends FunSuite with MockitoSugar {
   def await[T](f: Future[T], wait: Duration = 1.second) =
     Await.result(f, wait)
 
-  class TestTransport(addr: SocketAddress) extends Transport[Any, Any] {
-    private[this] val _onClose = Promise[Throwable]()
-    def write(req: Any): Future[Unit] = Future.never
-    def read(): Future[Any] = Future.never
-    def status: Status = Status.Open
-    def onClose: Future[Throwable] = _onClose
-    def localAddress: SocketAddress = addr
-    def remoteAddress: SocketAddress = addr
-    def peerCertificate: Option[Certificate] = None
-    def close(deadline: Time): Future[Unit] = {
-      _onClose.setValue(new Exception("boom!"))
-      Future.Unit
-    }
-  }
-
-  class BackingTransporter(
-      fn: SocketAddress => Transport[Any, Any])
-    extends Transporter[Any, Any] {
-
-    var count = 0
-
-    def apply(addr: SocketAddress): Future[Transport[Any, Any]] = {
-      count += 1
-      Future.value(fn(addr))
-    }
-  }
-
-  class TestTransporter extends BackingTransporter(new TestTransport(_))
-
-  test("Http2Transporter caches transports") {
-    val transporter = new Http2Transporter(new TestTransporter(), new TestTransporter()) {
-      def cached(addr: SocketAddress) = transporterCache.containsKey(addr)
-    }
-
-    val addr = new InetSocketAddress("127.1", 14400)
-    val tf = transporter(addr)
-    assert(transporter.cached(addr))
-    val t = await(tf)
-    await(t.close())
-    assert(!transporter.cached(addr))
-  }
-
-  test("Http2Transporter decaches transport when closed") {
-    val transporter = new Http2Transporter(new TestTransporter(), new TestTransporter()) {
-      def cached(addr: SocketAddress) = transporterCache.containsKey(addr)
-    }
-
-    val addr = new InetSocketAddress("127.1", 14400)
-    val tf = transporter(addr)
-    assert(transporter.cached(addr))
-    val t = await(tf)
-    await(t.close())
-    assert(!transporter.cached(addr))
-  }
-
   test("Http2Transporter uses http11 for the second outstanding transport preupgrade") {
-    val (t1, t2) = (new TestTransporter(), new TestTransporter())
-    val transporter = new Http2Transporter(t1, t2)
-    val addr = new InetSocketAddress("127.1", 14400)
+    val t1 = mock[Transporter[Any, Any, TransportContext]]
+    when(t1.apply()).thenReturn(Future.never)
 
-    await(transporter(addr))
-    assert(t1.count == 1)
-    assert(t2.count == 0)
+    val t2 = mock[Transporter[Any, Any, TransportContext]]
+    when(t2.apply()).thenReturn(Future.never)
 
-    await(transporter(addr))
-    assert(t1.count == 1)
-    assert(t2.count == 1)
+    val transporter = new Http2Transporter(t1, t2, false, Stack.Params.empty, new MockTimer())
+
+    val ft1 = transporter()
+    verify(t1, times(1)).apply()
+    verify(t2, times(0)).apply()
+
+    assert(!ft1.isDefined)
+    transporter()
+    verify(t1, times(1)).apply()
+    verify(t2, times(1)).apply()
   }
-
-  class UpgradeTransport(
-      upgradeRep: UpgradeEvent,
-      addr: SocketAddress)
-    extends TransportProxy[Any, Any](new TestTransport(addr)) {
-
-    @volatile var count = 0
-    def write(msg: Any): Future[Unit] = Future.Done
-    def read(): Future[Any] = if (count == 0) {
-      count += 1
-      Future.value(upgradeRep)
-    } else {
-      if (upgradeRep == UpgradeEvent.UPGRADE_SUCCESSFUL && count == 1) {
-        val rep = new DefaultFullHttpResponse(HttpVersion.HTTP_1_1, HttpResponseStatus.OK)
-        val message = Http2ClientDowngrader.Message(rep, 1)
-        count += 1
-        Future.value(message)
-      } else if (upgradeRep == UpgradeEvent.UPGRADE_SUCCESSFUL) {
-        Future.never
-      } else {
-        val rep = new DefaultFullHttpResponse(HttpVersion.HTTP_1_1, HttpResponseStatus.OK)
-        Future.value(rep)
-      }
-    }
-  }
-
-  class UpgradingTransporter(
-      upgradeRep: UpgradeEvent)
-    extends BackingTransporter(new UpgradeTransport(upgradeRep, _))
 
   test("Http2Transporter reuses the http2 transporter postupgrade") {
-    val t1 = new UpgradingTransporter(UpgradeEvent.UPGRADE_SUCCESSFUL)
-    val t2 = new TestTransporter()
-    val transporter = new Http2Transporter(t1, t2)
-    val addr = new InetSocketAddress("127.1", 14400)
+    val clientSession = mock[ClientSession]
+    val firstTransport = mock[Transport[Any, Any]]
+    when(firstTransport.read()).thenReturn(Future.never)
 
-    val trans = await(transporter(addr))
-    assert(t1.count == 1)
-    assert(t2.count == 0)
-    assert(await(trans.read()).asInstanceOf[HttpResponse].getStatus == HttpResponseStatus.OK)
+    val childTransport = mock[Transport[Any, Any]]
+    when(clientSession.newChildTransport()).thenReturn(Future.value(childTransport))
 
-    await(transporter(addr))
-    assert(t1.count == 1)
-    assert(t2.count == 0)
+    val read1 = new Object
+
+    val t1 = mock[Transporter[Any, Any, TransportContext]]
+    val upgradingTransport = mock[Transport[Any, Any]]
+    when(upgradingTransport.onClose).thenReturn(Future.never)
+
+    when(t1.apply()).thenReturn(Future.value(upgradingTransport))
+    when(upgradingTransport.write(any())).thenReturn(Future.Done)
+    when(upgradingTransport.read()).thenReturn(Future.value(UpgradeSuccessful { _ =>
+      val first = mock[Transport[Any, Any]]
+      when(first.read()).thenReturn(Future.value(read1))
+      clientSession -> first
+    }))
+
+    val t2 = mock[Transporter[Any, Any, TransportContext]]
+    val transporter = new Http2Transporter(t1, t2, false, Stack.Params.empty, new MockTimer())
+
+    val trans = await(transporter())
+    verify(t1, times(1)).apply()
+    verify(t2, times(0)).apply()
+
+    trans.write(LastHttpContent.EMPTY_LAST_CONTENT)
+    assert(await(trans.read()) == read1)
+    verify(clientSession, times(0)).newChildTransport()
+
+    await(transporter())
+    verify(t1, times(1)).apply()
+    verify(t2, times(0)).apply()
+    verify(clientSession, times(1)).newChildTransport()
   }
 
   test("Http2Transporter uses the http11 transporter post rejection") {
-    val t1 = new UpgradingTransporter(UpgradeEvent.UPGRADE_REJECTED)
-    val t2 = new TestTransporter()
-    val transporter = new Http2Transporter(t1, t2)
-    val addr = new InetSocketAddress("127.1", 14400)
+    val t1 = mock[Transporter[Any, Any, TransportContext]]
+    val upgradingTransport = mock[Transport[Any, Any]]
+    when(upgradingTransport.onClose).thenReturn(Future.never)
+    when(upgradingTransport.write(any())).thenReturn(Future.Done)
+    val read1 = new Object
+    when(upgradingTransport.read()).thenReturn(
+      Future.value(Http2UpgradingTransport.UpgradeRejected),
+      Future.value(read1) // second read
+    )
 
-    val trans = await(transporter(addr))
-    assert(t1.count == 1)
-    assert(t2.count == 0)
-    assert(await(trans.read()).asInstanceOf[HttpResponse].getStatus == HttpResponseStatus.OK)
+    when(t1.apply()).thenReturn(Future.value(upgradingTransport))
 
-    await(transporter(addr))
-    assert(t1.count == 1)
-    assert(t2.count == 1)
+    val t2 = mock[Transporter[Any, Any, TransportContext]]
+    val t2transport = mock[Transport[Any, Any]]
+    when(t2.apply()).thenReturn(Future.value(t2transport))
+
+    val transporter = new Http2Transporter(t1, t2, false, Stack.Params.empty, new MockTimer())
+
+    val trans = await(transporter())
+    verify(t1, times(1)).apply()
+    verify(t2, times(0)).apply()
+
+    trans.write(LastHttpContent.EMPTY_LAST_CONTENT)
+    assert(await(trans.read()) == read1)
+    verify(upgradingTransport, times(1)).write(LastHttpContent.EMPTY_LAST_CONTENT)
+    verify(upgradingTransport, times(2)).read()
+
+    assert(await(transporter()) == t2transport)
+    verify(t1, times(1)).apply()
+    verify(t2, times(1)).apply()
   }
 
   test("Http2Transporter marks outstanding transports dead after a successful upgrade") {
-    val t1 = new UpgradingTransporter(UpgradeEvent.UPGRADE_SUCCESSFUL)
-    val t2 = new TestTransporter()
-    val transporter = new Http2Transporter(t1, t2)
-    val addr = new InetSocketAddress("127.1", 14400)
+    val clientSession = mock[ClientSession]
+    when(clientSession.status).thenReturn(Status.Open)
 
-    val trans = await(transporter(addr))
-    assert(t1.count == 1)
-    assert(t2.count == 0)
+    val t1 = mock[Transporter[Any, Any, TransportContext]]
+    val upgradingTransport = mock[Transport[Any, Any]]
+    when(upgradingTransport.onClose).thenReturn(Future.never)
+    when(upgradingTransport.write(any())).thenReturn(Future.Done)
+    val first = mock[Transport[Any, Any]]
+    val read1 = new Object
+    when(upgradingTransport.read()).thenReturn(Future.value(UpgradeSuccessful { _ =>
+      when(first.read()).thenReturn(Future.value(read1))
+      clientSession -> first
+    }))
 
-    val http11Trans = await(transporter(addr))
-    assert(t1.count == 1)
-    assert(t2.count == 1)
+    when(t1.apply()).thenReturn(Future.value(upgradingTransport))
+
+    val t2 = mock[Transporter[Any, Any, TransportContext]]
+    val t2transport = mock[Transport[Any, Any]]
+    when(t2.apply()).thenReturn(Future.value(t2transport))
+    when(t2transport.status).thenReturn(Status.Open)
+
+    val transporter = new Http2Transporter(t1, t2, false, Stack.Params.empty, new MockTimer())
+
+    val trans = await(transporter())
+    verify(t1, times(1)).apply()
+    verify(t2, times(0)).apply()
+
+    val http11Trans = await(transporter())
+    verify(t1, times(1)).apply()
+    verify(t2, times(1)).apply()
     assert(http11Trans.status == Status.Open)
 
-    assert(await(trans.read()).asInstanceOf[HttpResponse].getStatus == HttpResponseStatus.OK)
+    trans.write(LastHttpContent.EMPTY_LAST_CONTENT)
+    assert(await(trans.read()) == read1)
+    verify(upgradingTransport, times(1)).write(LastHttpContent.EMPTY_LAST_CONTENT)
+    verify(upgradingTransport, times(1)).read()
+    verify(first, times(1)).read()
 
     assert(http11Trans.status == Status.Closed)
   }
 
   test("Http2Transporter keeps outstanding transports alive after a failed upgrade") {
-    val t1 = new UpgradingTransporter(UpgradeEvent.UPGRADE_REJECTED)
-    val t2 = new TestTransporter()
-    val transporter = new Http2Transporter(t1, t2)
-    val addr = new InetSocketAddress("127.1", 14400)
+    val t1 = mock[Transporter[Any, Any, TransportContext]]
+    val upgradingTransport = mock[Transport[Any, Any]]
+    when(upgradingTransport.onClose).thenReturn(Future.never)
+    when(upgradingTransport.write(any())).thenReturn(Future.Done)
+    val read1 = new Object
+    when(upgradingTransport.read()).thenReturn(
+      Future.value(Http2UpgradingTransport.UpgradeRejected),
+      Future.value(read1) // second read
+    )
 
-    val trans = await(transporter(addr))
-    assert(t1.count == 1)
-    assert(t2.count == 0)
+    when(t1.apply()).thenReturn(Future.value(upgradingTransport))
 
-    val http11Trans = await(transporter(addr))
-    assert(t1.count == 1)
-    assert(t2.count == 1)
+    val t2 = mock[Transporter[Any, Any, TransportContext]]
+    val t2transport = mock[Transport[Any, Any]]
+    when(t2.apply()).thenReturn(Future.value(t2transport))
+    when(t2transport.status).thenReturn(Status.Open)
+
+    val transporter = new Http2Transporter(t1, t2, false, Stack.Params.empty, new MockTimer())
+
+    val trans = await(transporter())
+    verify(t1, times(1)).apply()
+    verify(t2, times(0)).apply()
+
+    val http11Trans = await(transporter())
+    verify(t1, times(1)).apply()
+    verify(t2, times(1)).apply()
     assert(http11Trans.status == Status.Open)
 
-    assert(await(trans.read()).asInstanceOf[HttpResponse].getStatus == HttpResponseStatus.OK)
+    trans.write(LastHttpContent.EMPTY_LAST_CONTENT)
+    assert(await(trans.read()) == read1)
+    verify(upgradingTransport, times(1)).write(LastHttpContent.EMPTY_LAST_CONTENT)
+    verify(upgradingTransport, times(2)).read()
 
     assert(http11Trans.status == Status.Open)
   }
 
-  class FirstFail(f: Future[Transport[Any, Any]]) extends Transporter[Any, Any] {
-    var first = true
-    var count = 0
-    def apply(addr: SocketAddress): Future[Transport[Any, Any]] = {
-      count += 1
-      if (first) {
-        first = false
-        f
-      } else Future.value(new TestTransport(addr))
-    }
-  }
-
-  test("Http2Transporter marks outstanding transports dead after a failed connect attempt") {
+  test("Http2Transporter doesn't mark outstanding transports dead after a failed connect attempt") {
     val p = Promise[Transport[Any, Any]]()
-    val t1 = new FirstFail(p)
-    val t2 = new TestTransporter()
-    val transporter = new Http2Transporter(t1, t2)
-    val addr = new InetSocketAddress("127.1", 14400)
+    val t1 = mock[Transporter[Any, Any, TransportContext]]
+    when(t1.apply()).thenReturn(p)
 
-    val fTrans = transporter(addr)
-    assert(!fTrans.isDefined)
-    assert(t1.count == 1)
-    assert(t2.count == 0)
+    val t2 = mock[Transporter[Any, Any, TransportContext]]
+    val t2transport = mock[Transport[Any, Any]]
+    when(t2.apply()).thenReturn(Future.value(t2transport))
+    when(t2transport.status).thenReturn(Status.Open)
 
-    val trans = await(transporter(addr))
-    assert(t1.count == 1)
-    assert(t2.count == 1)
-    assert(trans.status == Status.Open)
+    val transporter = new Http2Transporter(t1, t2, false, Stack.Params.empty, new MockTimer())
 
-    assert(!fTrans.isDefined)
+    val trans = transporter()
+    verify(t1, times(1)).apply()
+    verify(t2, times(0)).apply()
+
+    val http11Trans = await(transporter())
+    verify(t1, times(1)).apply()
+    verify(t2, times(1)).apply()
+    assert(http11Trans.status == Status.Open)
+
+    assert(!trans.isDefined)
     val e = new Exception("boom!")
     p.setException(e)
     val actual = intercept[Exception] {
-      await(fTrans)
+      await(trans)
     }
     assert(actual == e)
-    assert(trans.status == Status.Closed)
+    assert(http11Trans.status == Status.Open)
   }
 
   test("Http2Transporter can try to establish a connection again if a connection failed") {
     val e = new Exception("boom!")
-    val t1 = new FirstFail(Future.exception(e))
-    val t2 = new TestTransporter()
-    val transporter = new Http2Transporter(t1, t2)
-    val addr = new InetSocketAddress("127.1", 14400)
+
+    val upgradingTransport = mock[Transport[Any, Any]]
+    when(upgradingTransport.onClose).thenReturn(Future.never)
+
+    val t1 = mock[Transporter[Any, Any, TransportContext]]
+    when(t1.apply()).thenReturn(
+      Future.exception(e),
+      Future.value(upgradingTransport)
+    )
+
+    val t2 = mock[Transporter[Any, Any, TransportContext]]
+
+    val transporter = new Http2Transporter(t1, t2, false, Stack.Params.empty, new MockTimer())
 
     val actual = intercept[Exception] {
-      await(transporter(addr))
+      await(transporter())
     }
     assert(actual == e)
-    assert(t1.count == 1)
-    assert(t2.count == 0)
+    verify(t1, times(1)).apply()
+    verify(t2, times(0)).apply()
 
-    await(transporter(addr))
-    assert(t1.count == 2)
-    assert(t2.count == 0)
+    await(transporter())
+    verify(t1, times(2)).apply()
+    verify(t2, times(0)).apply()
+  }
+
+  test("Http2Transporter evicts the connection if it dies") {
+    val clientSession = mock[ClientSession]
+    when(clientSession.status).thenReturn(Status.Open)
+    val firstTransport = mock[Transport[Any, Any]]
+    when(firstTransport.read()).thenReturn(Future.never)
+
+    val childTransport = mock[Transport[Any, Any]]
+    when(clientSession.newChildTransport()).thenReturn(Future.value(childTransport))
+
+    val readValue = new Object
+
+    val t1 = mock[Transporter[Any, Any, TransportContext]]
+    val upgradingTransport = mock[Transport[Any, Any]]
+    when(upgradingTransport.onClose).thenReturn(Future.never)
+
+    when(t1.apply()).thenReturn(Future.value(upgradingTransport))
+    when(upgradingTransport.write(any())).thenReturn(Future.Done)
+    when(upgradingTransport.read()).thenReturn(Future.value(UpgradeSuccessful { _ =>
+      val first = mock[Transport[Any, Any]]
+      when(first.read()).thenReturn(Future.value(readValue))
+      clientSession -> first
+    }))
+
+    val t2 = mock[Transporter[Any, Any, TransportContext]]
+    val transporter = new Http2Transporter(t1, t2, false, Stack.Params.empty, new MockTimer())
+
+    val trans = await(transporter())
+    verify(t1, times(1)).apply()
+    verify(t2, times(0)).apply()
+
+    trans.write(LastHttpContent.EMPTY_LAST_CONTENT)
+    assert(await(trans.read()) == readValue)
+    verify(clientSession, times(0)).newChildTransport()
+
+    await(transporter())
+    verify(t1, times(1)).apply()
+    verify(t2, times(0)).apply()
+    verify(clientSession, times(1)).newChildTransport()
+
+    // No set the status of the ClientSession to Closed so it gets evicted.
+    when(clientSession.status).thenReturn(Status.Closed)
+
+    // This should be another first transporter.
+    val f2 = await(transporter())
+    verify(t1, times(2)).apply()
+    verify(t2, times(0)).apply()
+
+    assert(await(f2.read()) == readValue)
   }
 }

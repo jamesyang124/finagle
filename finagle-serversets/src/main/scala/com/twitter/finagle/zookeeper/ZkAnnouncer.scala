@@ -1,13 +1,14 @@
 package com.twitter.finagle.zookeeper
 
-import com.twitter.common.zookeeper.ServerSet.EndpointStatus
-import com.twitter.common.zookeeper.{ServerSet, ServerSetImpl, ZooKeeperClient}
+import com.twitter.finagle.common.zookeeper.ServerSet.EndpointStatus
+import com.twitter.finagle.common.zookeeper.{ServerSet, ServerSetImpl, ZooKeeperClient}
 import com.twitter.finagle.{Announcer, Announcement}
-import com.twitter.util.{Future, NonFatal, Promise}
+import com.twitter.util.{Future, Promise}
 import java.net.InetSocketAddress
 import java.util.concurrent.LinkedBlockingQueue
 import scala.collection.JavaConverters._
 import scala.collection.mutable
+import scala.util.control.NonFatal
 
 /**
  * Indicates that a failure occurred while attempting to announce the server
@@ -52,7 +53,7 @@ class ZkAnnouncer(factory: ZkClientFactory) extends Announcer { self =>
     setDaemon(true)
     start()
 
-    override def run() {
+    override def run(): Unit = {
       while (true) {
         val change = q.take()
         try {
@@ -90,7 +91,9 @@ class ZkAnnouncer(factory: ZkClientFactory) extends Announcer { self =>
   ): Future[Announcement] = {
     val zkHosts = factory.hostSet(hosts)
     if (zkHosts.isEmpty)
-      Future.exception(new ZkAnnouncerException("ZK client address \"%s\" resolves to nothing".format(hosts)))
+      Future.exception(
+        new ZkAnnouncerException("ZK client address \"%s\" resolves to nothing".format(hosts))
+      )
     else
       announce(factory.get(zkHosts)._1, path, shardId, addr, endpoint)
   }
@@ -102,7 +105,9 @@ class ZkAnnouncer(factory: ZkClientFactory) extends Announcer { self =>
     addr: InetSocketAddress,
     endpoint: Option[String]
   ): Future[Announcement] = {
-    val conf = serverSets find { s => s.client == client && s.path == path && s.shardId == shardId } getOrElse {
+    val conf = serverSets find { s =>
+      s.client == client && s.path == path && s.shardId == shardId
+    } getOrElse {
       val serverSetConf = ServerSetConf(client, path, shardId, new ServerSetImpl(client, path))
       synchronized { serverSets += serverSetConf }
       serverSetConf

@@ -1,21 +1,18 @@
 package com.twitter.finagle.thrift
 
-import com.twitter.conversions.time._
+import com.twitter.conversions.DurationOps._
 import com.twitter.finagle.{Status, Service, WriteException}
 import com.twitter.util.{Await, Future, Promise, Return, Throw}
 import org.apache.thrift.TApplicationException
 import org.apache.thrift.protocol.{TBinaryProtocol, TMessage, TMessageType}
-import org.junit.runner.RunWith
 import org.mockito.Matchers
 import org.mockito.Mockito.{verify, when, times}
 import org.scalatest.FunSuite
-import org.scalatest.junit.JUnitRunner
-import org.scalatest.mock.MockitoSugar
+import org.scalatest.mockito.MockitoSugar
 
-@RunWith(classOf[JUnitRunner])
 class ValidateThriftServiceTest extends FunSuite with MockitoSugar {
 
-  case class ValidateThriftServiceContext(p: Promise[Array[Byte]] = new Promise[Array[Byte]]){
+  case class ValidateThriftServiceContext(p: Promise[Array[Byte]] = new Promise[Array[Byte]]) {
     def newValidate() = new ValidateThriftService(service, protocolFactory)
 
     lazy val service: Service[ThriftClientRequest, Array[Byte]] = {
@@ -65,7 +62,8 @@ class ValidateThriftServiceTest extends FunSuite with MockitoSugar {
       TApplicationException.INVALID_MESSAGE_TYPE,
       TApplicationException.MISSING_RESULT,
       TApplicationException.UNKNOWN,
-      TApplicationException.WRONG_METHOD_NAME)
+      TApplicationException.WRONG_METHOD_NAME
+    )
 
     for (typ <- codes) {
       val buf = new OutputBuffer(protocolFactory)
@@ -96,8 +94,7 @@ class ValidateThriftServiceTest extends FunSuite with MockitoSugar {
     val c = ValidateThriftServiceContext()
     import c._
 
-    val codes = Seq(TApplicationException.INTERNAL_ERROR,
-      TApplicationException.UNKNOWN_METHOD)
+    val codes = Seq(TApplicationException.INTERNAL_ERROR, TApplicationException.UNKNOWN_METHOD)
 
     for (typ <- codes) {
       val buf = new OutputBuffer(protocolFactory)

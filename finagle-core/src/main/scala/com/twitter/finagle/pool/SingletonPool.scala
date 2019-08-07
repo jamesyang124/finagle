@@ -8,18 +8,23 @@ import java.util.concurrent.atomic.{AtomicReference, AtomicInteger}
 import scala.annotation.tailrec
 
 private[finagle] object SingletonPool {
-  val role = StackClient.Role.pool
+  val role: Stack.Role = StackClient.Role.pool
 
   /**
    * Creates a [[com.twitter.finagle.Stackable]] [[com.twitter.finagle.pool.SingletonPool]].
+   *
+   * @param allowInterrupts forwards the parameter to the [[SingletonPool]] constructor.
+   * See the constructor for semantics. Note, this isn't a [[Stack.Param]] since it's not
+   * something we want to be configured by users, but rather it is a parameter for protocol
+   * implementors.
    */
-  def module[Req, Rep]: Stackable[ServiceFactory[Req, Rep]] =
+  def module[Req, Rep](allowInterrupts: Boolean): Stackable[ServiceFactory[Req, Rep]] =
     new Stack.Module1[param.Stats, ServiceFactory[Req, Rep]] {
-      val role = SingletonPool.role
+      val role: Stack.Role = SingletonPool.role
       val description = "Maintain at most one connection"
-      def make(_stats: param.Stats, next: ServiceFactory[Req, Rep]) = {
+      def make(_stats: param.Stats, next: ServiceFactory[Req, Rep]): ServiceFactory[Req, Rep] = {
         val param.Stats(sr) = _stats
-        new SingletonPool(next, sr.scope("singletonpool"))
+        new SingletonPool(next, allowInterrupts, sr.scope("singletonpool"))
       }
     }
 
@@ -33,7 +38,7 @@ private[finagle] object SingletonPool {
    * from crossing the 0 boundary multiple times -- it may thus call
    * 'close' on the underlying service multiple times.
    */
-  class RefcountedService[Req, Rep](underlying: Service[Req, Rep])
+  private class RefcountedService[Req, Rep](underlying: Service[Req, Rep])
       extends ServiceProxy[Req, Rep](underlying) {
     private[this] val count = new AtomicInteger(1)
     private[this] val future = Future.value(this)
@@ -55,11 +60,11 @@ private[finagle] object SingletonPool {
       }
   }
 
-  sealed trait State[-Req, +Rep]
-  case object Idle extends State[Any, Nothing]
-  case object Closed extends State[Any, Nothing]
-  case class Awaiting(done: Future[Unit]) extends State[Any, Nothing]
-  case class Open[Req, Rep](service: RefcountedService[Req, Rep]) extends State[Req, Rep]
+  private sealed trait State[-Req, +Rep]
+  private case object Idle extends State[Any, Nothing]
+  private case object Closed extends State[Any, Nothing]
+  private case class Awaiting(done: Future[Unit]) extends State[Any, Nothing]
+  private case class Open[Req, Rep](service: RefcountedService[Req, Rep]) extends State[Req, Rep]
 }
 
 /**
@@ -67,11 +72,22 @@ private[finagle] object SingletonPool {
  * ServiceFactory -- concurrent leases share the same, cached
  * service. A new Service is established whenever the service factory
  * fails or the current service has become unavailable.
+ *
+ * @param underlying the underlying shared resource which the pool manages.
+ *
+ * @param allowInterrupts Because the pool hands back a shared resource, it
+ * may be useful to manage interrupts such that they are isolated from independent
+ * service acquisition requests. Thus, setting this value to `false` will ensure that
+ * an outstanding dispatch to the underlying resource from the pool is uninterruptible
+ * but individual service acquisition requests are.
+ *
+ * @param statsReceiver the [[StatsReceiver]] that is used to report pool specific stats.
  */
 class SingletonPool[Req, Rep](
   underlying: ServiceFactory[Req, Rep],
+  allowInterrupts: Boolean,
   statsReceiver: StatsReceiver)
-extends ServiceFactory[Req, Rep] {
+    extends ServiceFactory[Req, Rep] {
   import SingletonPool._
 
   private[this] val scoped = statsReceiver.scope("connects")
@@ -86,9 +102,9 @@ extends ServiceFactory[Req, Rep] {
    * Connect satisfies passed-in promise when the process is
    * complete.
    */
-  private[this] def connect(done: Promise[Unit], conn: ClientConnection) {
+  private[this] def connect(done: Promise[Unit], conn: ClientConnection): Unit = {
     def complete(newState: State[Req, Rep]) = state.get match {
-      case s@Awaiting(d) if d == done => state.compareAndSet(s, newState)
+      case s @ Awaiting(d) if d == done => state.compareAndSet(s, newState)
       case Idle | Closed | Awaiting(_) | Open(_) => false
     }
 
@@ -108,8 +124,9 @@ extends ServiceFactory[Req, Rep] {
         complete(Idle)
         svc.close()
         Future.exception(
-          Failure("Returned unavailable service", Failure.Restartable)
-            .withSource(Failure.Source.Role, SingletonPool.role))
+          Failure("Returned unavailable service", FailureFlags.Retryable)
+            .withSource(Failure.Source.Role, SingletonPool.role)
+        )
 
       case Return(svc) =>
         if (!complete(Open(new RefcountedService(svc))))
@@ -121,8 +138,22 @@ extends ServiceFactory[Req, Rep] {
 
   // These two await* methods are required to trick the compiler into accepting
   // the definitions of 'apply' and 'close' as tail-recursive.
-  private[this] def awaitApply(done: Future[Unit], conn: ClientConnection) =
-    done before apply(conn)
+  private[this] def awaitApply(done: Future[Unit], conn: ClientConnection) = {
+    // `f` represents a request to `underlying` to acquire a new service.
+    val f = done.before(apply(conn))
+    // if we allow interrupts, we return a direct handle to the process. Otherwise,
+    // we returned a derivative future which can be interrupted immediately, but will
+    // ensure the release of its interest in any ref-counted session that materializes.
+    if (allowInterrupts) f
+    else
+      f.interruptible().onFailure {
+        case _: Throwable =>
+          // If this fails it is either because `f` failed or we were interrupted. If `f`
+          // does succeed we need to release the ref-count since the caller will never
+          // get a reference to the `Service` to release it.
+          f.onSuccess(_.close())
+      }
+  }
 
   @tailrec
   final def apply(conn: ClientConnection): Future[Service[Req, Rep]] = state.get match {
@@ -133,7 +164,7 @@ extends ServiceFactory[Req, Rep] {
       // with it.
       svc.open()
 
-    case s@Open(svc) => // service died; try to reconnect.
+    case s @ Open(svc) => // service died; try to reconnect.
       if (state.compareAndSet(s, Idle))
         svc.close()
       apply(conn)
@@ -157,7 +188,7 @@ extends ServiceFactory[Req, Rep] {
   /**
    * @inheritdoc
    *
-   * The status of a [[SingletonPool]] is the worse of the 
+   * The status of a [[SingletonPool]] is the worse of the
    * the underlying status and the status of the currently
    * cached service, if any.
    */
@@ -188,22 +219,23 @@ extends ServiceFactory[Req, Rep] {
     closeService(deadline) before underlying.close(deadline)
 
   @tailrec
-  private[this] def closeService(deadline: Time): Future[Unit] = 
+  private[this] def closeService(deadline: Time): Future[Unit] =
     state.get match {
       case Idle =>
         if (!state.compareAndSet(Idle, Closed)) closeService(deadline)
         else Future.Done
-  
-      case s@Open(svc) =>
+
+      case s @ Open(svc) =>
         if (!state.compareAndSet(s, Closed)) closeService(deadline)
         else svc.close(deadline)
-  
-      case s@Awaiting(done) =>
-        if (!state.compareAndSet(s, Closed)) closeService(deadline) else {
+
+      case s @ Awaiting(done) =>
+        if (!state.compareAndSet(s, Closed)) closeService(deadline)
+        else {
           done.raise(new ServiceClosedException)
           Future.Done
         }
-  
+
       case Closed =>
         Future.Done
     }

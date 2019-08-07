@@ -2,46 +2,37 @@ package com.twitter.finagle.integration
 
 import com.twitter.finagle.Stack
 import com.twitter.finagle.integration.thriftscala.Echo
+import com.twitter.finagle.memcached.protocol.Value
+import com.twitter.finagle.memcached.protocol.text.server.ResponseToBuf
+import com.twitter.finagle.memcached.protocol.text.transport.MemcachedNetty4ClientPipelineInit
 import com.twitter.finagle.memcached.{protocol => memcached}
-import com.twitter.finagle.mux.{transport => mux}
-import com.twitter.finagle.netty4.{ByteBufAsBuf, http}
 import com.twitter.finagle.thrift.transport.{netty4 => thrift}
 import com.twitter.io.Buf
-import io.netty.buffer.{ByteBufHolder, ByteBuf, Unpooled}
+import io.netty.buffer.Unpooled
 import io.netty.channel.ChannelPipeline
 import io.netty.channel.embedded.EmbeddedChannel
-import io.netty.handler.codec.{http => nhttp}
 import org.apache.thrift.protocol.TBinaryProtocol
 import org.apache.thrift.transport.{TFramedTransport, TMemoryBuffer}
-import org.junit.runner.RunWith
 import org.scalatest.FunSuite
-import org.scalatest.junit.JUnitRunner
 
 /**
- * Protocols must release inbound direct buffers
+ * The majority of finagle protocols manage inbound direct buffers in their netty pipeline.
  *
  * Covered protocols:
  *
- *  http 1.1
- *  todo: http2
  *  kestrel (implicitly via memcached)
  *  memcached
- *  mysql (coverage from c.t.f.netty4.channel.Netty4ClientChannelInitializerTest)
  *  thrift
- *  thriftmux
+ *  mysql (coverage from c.t.f.netty4.channel.Netty4ClientChannelInitializerTest)
+ *  redis (uses framed n4 channel init so coverage comes from c.t.f.n4.channel.Netty4ClientChannelInitializerTest)
+ *  http/1.1, http/2 (coverage from c.t.f.http.DirectPayloadsLifecycleTest)
  */
-@RunWith(classOf[JUnitRunner])
 class DirectBufferLifecycleTest extends FunSuite {
 
   /**
    * @tparam T the framed protocol type
    */
-  def testDirect[T](
-    protocol: String,
-    msg: Buf,
-    pipelineInit: (ChannelPipeline => Unit),
-    framedCB: T => Unit = { _: Any => () }
-  ) =
+  def testDirect[T](protocol: String, msg: Buf, pipelineInit: (ChannelPipeline => Unit)) =
     test(s"$protocol framer releases inbound direct byte bufs") {
       val e = new EmbeddedChannel()
       pipelineInit(e.pipeline)
@@ -51,100 +42,24 @@ class DirectBufferLifecycleTest extends FunSuite {
       e.writeInbound(direct)
       assert(direct.refCnt() == 0)
       val framed: T = e.readInbound[T]()
-      framedCB(framed)
     }
 
-  testDirect[ByteBufAsBuf](
-    protocol = "mux client/server",
-    msg = Buf.U32BE(4).concat(mux.Message.encode(mux.Message.Tping(123))),
-    pipelineInit = mux.Netty4Framer,
-    framedCB = { x => assert(!x.underlying.isDirect) }
-  )
-
-  testDirect[ByteBufHolder](
-    protocol = "http 1.1 server",
-    msg = {
-      val content = "some content".getBytes("UTF-8")
-      val req = new nhttp.DefaultFullHttpRequest(
-        nhttp.HttpVersion.HTTP_1_1,
-        nhttp.HttpMethod.GET,
-        "/path",
-        Unpooled.wrappedBuffer(content)
-      )
-      nhttp.HttpUtil.setContentLength(req, content.length)
-
-      val e = new EmbeddedChannel()
-      val enc = new nhttp.HttpRequestEncoder()
-      e.pipeline.addLast(enc)
-      assert(e.writeOutbound(req))
-      ByteBufAsBuf.Owned(e.readOutbound[ByteBuf]())
-    },
-    pipelineInit = http.exp.ServerPipelineInit(Stack.Params.empty),
-    framedCB = { x => assert(!x.content().isDirect) }
-  )
-
-  def http1Resp(): nhttp.HttpResponse =  {
-    val resp =
-      new nhttp.DefaultFullHttpResponse(
-        nhttp.HttpVersion.HTTP_1_1,
-        nhttp.HttpResponseStatus.OK,
-        Unpooled.wrappedBuffer("pretty cool response".getBytes("UTF-8"))
-      )
-    nhttp.HttpUtil.setContentLength(resp, resp.content.readableBytes)
-    resp
-  }
-
-  val http1RespBytes: ByteBuf = {
-    val e = new EmbeddedChannel()
-    val enc = new nhttp.HttpResponseEncoder()
-    e.pipeline.addLast(enc)
-    assert(e.writeOutbound(http1Resp()))
-    e.readOutbound[ByteBuf]()
-  }
-
-  def http1Req(): nhttp.HttpRequest = {
-    val req = new nhttp.DefaultFullHttpRequest(
-      nhttp.HttpVersion.HTTP_1_1,
-      nhttp.HttpMethod.GET,
-      "/path",
-      Unpooled.wrappedBuffer("rad request".getBytes("UTF-8"))
-    )
-    nhttp.HttpUtil.setContentLength(req, req.content.readableBytes)
-    req
-  }
-
-  testDirect[ByteBufHolder](
-    protocol = "http 1.1 client",
-    msg = ByteBufAsBuf.Owned(http1RespBytes),
-    pipelineInit = { (pipe: ChannelPipeline) =>
-      http.exp.ClientPipelineInit(Stack.Params.empty)(pipe)
-      pipe.writeAndFlush(http1Req())
-    },
-    framedCB = { x => assert(!x.content().isDirect) }
-  )
-
-  testDirect[ByteBufAsBuf](
+  testDirect[Buf](
     protocol = "memcached server",
     msg = {
-      val cte: memcached.text.AbstractCommandToEncoding[AnyRef] = new memcached.text.CommandToEncoding
-      val enc = new memcached.text.Encoder
+      val cte = new memcached.text.client.CommandToBuf
       val command = memcached.Get(Seq(Buf.Utf8("1")))
-      enc.encode(null, null, cte.encode(command))
+      cte.encode(command)
     },
-    pipelineInit = memcached.text.transport.Netty4ServerFramer,
-    framedCB = { x => assert(!x.underlying.isDirect) }
+    pipelineInit = memcached.text.transport.Netty4ServerFramer
   )
 
-  testDirect[ByteBufAsBuf](
+  testDirect[Buf](
     protocol = "memcached client",
-    msg = {
-      val cte = new memcached.text.CommandToEncoding[AnyRef]
-      val enc = new memcached.text.Encoder
-      val command = memcached.Get(Seq(Buf.Utf8("1")))
-      enc.encode(null, null, cte.encode(command))
-    },
-    pipelineInit = memcached.text.transport.Netty4ClientFramer,
-    framedCB = { x => assert(!x.underlying.isDirect) }
+    msg = ResponseToBuf.encode(
+      memcached.Values(Seq(Value(Buf.Utf8("key"), Buf.Utf8("1"), None, None)))
+    ),
+    pipelineInit = MemcachedNetty4ClientPipelineInit
   )
 
   testDirect[Array[Byte]](

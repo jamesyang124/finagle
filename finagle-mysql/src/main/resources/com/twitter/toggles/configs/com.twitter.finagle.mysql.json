@@ -1,8 +1,8 @@
 {
   "toggles": [
     {
-      "id": "com.twitter.finagle.mysql.UseNetty4",
-      "description": "Use netty4 as the transport implementation",
+      "id": "com.twitter.finagle.mysql.IncludeHandshakeInServiceAcquisition",
+      "description": "Perform MySQL session connection phase (handshaking) as part of service acquisition",
       "fraction": 0.0
     }
   ]

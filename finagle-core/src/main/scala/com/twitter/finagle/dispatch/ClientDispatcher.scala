@@ -1,47 +1,24 @@
 package com.twitter.finagle.dispatch
 
-import com.twitter.concurrent.AsyncSemaphore
-import com.twitter.finagle.stats.{NullStatsReceiver, StatsReceiver}
 import com.twitter.finagle.tracing.Trace
 import com.twitter.finagle.transport.Transport
-import com.twitter.finagle.{Status, Service, Failure, WriteException}
+import com.twitter.finagle.{Failure, FailureFlags, Service, Status, WriteException}
 import com.twitter.util._
 import java.net.InetSocketAddress
 
 /**
- * Dispatches requests one at a time; concurrent requests are queued.
+ * Dispatches requests.
  *
- * @param statsReceiver typically scoped to `clientName/dispatcher`
+ * @note this construct makes no guarantees with regard to concurrent
+ * dispatches. For implementations that require serial dispatch see the
+ * [[GenSerialClientDispatcher]].
  */
-abstract class GenSerialClientDispatcher[Req, Rep, In, Out](
-    trans: Transport[In, Out],
-    statsReceiver: StatsReceiver)
-  extends Service[Req, Rep] {
+abstract class ClientDispatcher[Req, Rep, In, Out](trans: Transport[In, Out])
+    extends Service[Req, Rep] {
 
-  def this(trans: Transport[In, Out]) =
-    this(trans, NullStatsReceiver)
-
-  private[this] val semaphore = new AsyncSemaphore(1)
-
-  private[this] val queueSize =
-    statsReceiver.scope("serial").addGauge("queue_size") {
-      semaphore.numWaiters
-    }
-
-  private[this] val localAddress: InetSocketAddress = trans.localAddress match {
+  private[this] def localAddress: InetSocketAddress = trans.context.localAddress match {
     case ia: InetSocketAddress => ia
     case _ => new InetSocketAddress(0)
-  }
-
-
-  // satisfy pending requests on transport close
-  trans.onClose.respond { res =>
-    val exc = res match {
-      case Return(exc) => exc
-      case Throw(exc) => exc
-    }
-
-    semaphore.fail(exc)
   }
 
   /**
@@ -61,14 +38,15 @@ abstract class GenSerialClientDispatcher[Req, Rep, In, Out](
   private[this] def tryDispatch(req: Req, p: Promise[Rep]): Future[Unit] =
     p.isInterrupted match {
       case Some(intr) =>
-        p.setException(Failure.adapt(intr, Failure.Interrupted))
+        p.setException(Failure.adapt(intr, FailureFlags.Interrupted))
         Future.Done
       case None =>
         Trace.recordClientAddr(localAddress)
 
-        p.setInterruptHandler { case intr =>
-          if (p.updateIfEmpty(Throw(intr)))
-            trans.close()
+        p.setInterruptHandler {
+          case intr =>
+            if (p.updateIfEmpty(Throw(intr)))
+              trans.close()
         }
 
         dispatch(req, p)
@@ -76,18 +54,10 @@ abstract class GenSerialClientDispatcher[Req, Rep, In, Out](
 
   def apply(req: Req): Future[Rep] = {
     val p = new Promise[Rep]
-
-    semaphore.acquire().respond {
-      case Return(permit) =>
-        tryDispatch(req, p).respond {
-          case t@Throw(_) =>
-            p.updateIfEmpty(t.cast[Rep])
-            permit.release()
-          case Return(_) =>
-            permit.release()
-        }
-      case t@Throw(_) =>
-        p.update(t.cast[Rep])
+    tryDispatch(req, p).respond {
+      case t @ Throw(_) =>
+        p.updateIfEmpty(t.cast[Rep])
+      case Return(_) =>
     }
 
     p
@@ -98,38 +68,10 @@ abstract class GenSerialClientDispatcher[Req, Rep, In, Out](
   override def close(deadline: Time): Future[Unit] = trans.close()
 }
 
-object GenSerialClientDispatcher {
+object ClientDispatcher {
 
   val StatsScope: String = "dispatcher"
 
-  val wrapWriteException: PartialFunction[Throwable, Future[Nothing]] = {
-    case exc: Throwable => Future.exception(WriteException(exc))
-  }
-}
-
-/**
- * @param statsReceiver typically scoped to `clientName/dispatcher`
- */
-class SerialClientDispatcher[Req, Rep](
-    trans: Transport[Req, Rep],
-    statsReceiver: StatsReceiver)
-  extends GenSerialClientDispatcher[Req, Rep, Req, Rep](
-    trans,
-    statsReceiver) {
-
-  import GenSerialClientDispatcher.wrapWriteException
-
-  def this(trans: Transport[Req, Rep]) =
-    this(trans, NullStatsReceiver)
-
-  private[this] val readTheTransport: Unit => Future[Rep] = _ => trans.read()
-
-  protected def dispatch(req: Req, p: Promise[Rep]): Future[Unit] =
-    trans.write(req)
-      .rescue(wrapWriteException)
-      .flatMap(readTheTransport)
-      .respond(rep => p.updateIfEmpty(rep))
-      .unit
-
-  protected def write(req: Req): Future[Unit] = trans.write(req)
+  def wrapWriteException(exc: Throwable): Future[Nothing] =
+    Future.exception(WriteException(exc))
 }

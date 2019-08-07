@@ -1,39 +1,37 @@
 package com.twitter.finagle.client
 
-import com.twitter.conversions.time._
+import com.twitter.conversions.DurationOps._
 import com.twitter.finagle.client.LatencyCompensation.Compensator
 import com.twitter.finagle.service.TimeoutFilter
 import com.twitter.finagle.stack.nilStack
 import com.twitter.finagle._
+import com.twitter.finagle.client.utils.StringClient
+import com.twitter.finagle.server.utils.StringServer
 import com.twitter.util._
 import java.net.InetSocketAddress
-import org.junit.runner.RunWith
 import org.scalatest.concurrent.{Eventually, IntegrationPatience}
-import org.scalatest.junit.{AssertionsForJUnit, JUnitRunner}
+import org.scalatest.junit.AssertionsForJUnit
 import org.scalatest.{BeforeAndAfterEach, FunSuite}
 
 /**
  * An end-to-end test for LatencyCompensation.
  */
-@RunWith(classOf[JUnitRunner])
 class LatencyCompensationTest
-  extends FunSuite
-  with AssertionsForJUnit
-  with Eventually
-  with BeforeAndAfterEach
-  with IntegrationPatience
-{
+    extends FunSuite
+    with AssertionsForJUnit
+    with Eventually
+    with BeforeAndAfterEach
+    with IntegrationPatience {
   def verifyCompensationModule(expected: Duration) =
     new Stack.Module[ServiceFactory[String, String]] {
       val role = Stack.Role("verify")
       val description = "Verify stack behavior"
-      val parameters = Seq(
-        implicitly[Stack.Param[LatencyCompensation.Compensator]])
+      val parameters = Seq(implicitly[Stack.Param[LatencyCompensation.Compensator]])
       def make(prms: Stack.Params, next: Stack[ServiceFactory[String, String]]) = {
         val LatencyCompensation.Compensation(compensation) = prms[LatencyCompensation.Compensation]
         assert(expected == compensation)
 
-        Stack.Leaf(this, ServiceFactory.const(Service.mk[String, String](Future.value)))
+        Stack.leaf(this, ServiceFactory.const(Service.mk[String, String](Future.value)))
       }
     }
 
@@ -66,8 +64,9 @@ class LatencyCompensationTest
 
     class TestPromise[T] extends Promise[T] {
       @volatile var interrupted: Option[Throwable] = None
-      setInterruptHandler { case exc =>
-        interrupted = Some(exc)
+      setInterruptHandler {
+        case exc =>
+          interrupted = Some(exc)
       }
     }
     val receive, respond = new TestPromise[String]
@@ -75,7 +74,6 @@ class LatencyCompensationTest
     def awaitReceipt(): Unit =
       // Spin on this so we don't Await into a new thread, which breaks the clock.
       while (receive.poll == None) {}
-
 
     val service = Service.mk[String, String] { in =>
       receive.setValue(in)
@@ -91,19 +89,22 @@ class LatencyCompensationTest
       }
     }
 
-    lazy val baseEchoClient = Echo.stringClient
-          .configured(TimeoutFilter.Param(baseTimeout))
-          .configured(param.Timer(timer))
+    lazy val baseEchoClient = StringClient.client
+      .configured(TimeoutFilter.Param(baseTimeout))
+      .configured(param.Timer(timer))
 
     lazy val compensatedEchoClient = baseEchoClient
-          .configured(LatencyCompensation.Compensator(compensator))
+      .configured(LatencyCompensation.Compensator(compensator))
 
     /*
      * N.B. connection timeout compensation is not tested
      * end-to-end-because it's tricky to cause connection latency.
      */
-    def whileConnected(echoClient: Echo.Client)(f: Service[String, String] => Unit): Unit = {
-      val server = Echo.serve("127.1:0", service)
+    def whileConnected(
+      echoClient: StringClient.Client
+    )(f: Service[String, String] => Unit
+    ): Unit = {
+      val server = StringServer.server.serve("127.1:0", service)
       val ia = server.boundAddress.asInstanceOf[InetSocketAddress]
       val addr = Addr.Bound(Set[Address](Address(ia)), metadata)
       val client = echoClient.newService(Name.Bound(Var.value(addr), "id"), "label")
@@ -113,8 +114,7 @@ class LatencyCompensationTest
     }
   }
 
-
-  test("TimeoutFilter.module accomodates latency compensation") {
+  test("TimeoutFilter.module accommodates latency compensation") {
     new Ctx {
       metadata = Addr.Metadata("compensation" -> 2.seconds)
 
@@ -139,7 +139,9 @@ class LatencyCompensationTest
     }
   }
 
-  test("TimeoutFilter.module accomodates configured latency compensation even when default override is set") {
+  test(
+    "TimeoutFilter.module accommodates configured latency compensation even when default override is set"
+  ) {
     new Ctx {
       // set a compensation to 0 which should cause a failure if the caller does not
       // explicitly .configure the client with a compensation parameter.
@@ -148,7 +150,6 @@ class LatencyCompensationTest
       metadata = Addr.Metadata("compensation" -> 2.seconds)
 
       Time.withCurrentTimeFrozen { clock =>
-
         // use the client which is configured with a compensation parameter
         whileConnected(compensatedEchoClient) { client =>
           val yo = client("yo")
@@ -170,7 +171,7 @@ class LatencyCompensationTest
     }
   }
 
-  test("TimeoutFilter.module accomodates configured latency compensation when set by override") {
+  test("TimeoutFilter.module accommodates configured latency compensation when set by override") {
     new Ctx {
       // Do not set the .configured param for LatencyCompensation. Instead override the default
       // compensation to 2 seconds which will make this succeed.
@@ -198,47 +199,46 @@ class LatencyCompensationTest
   }
 
   if (!sys.props.contains("SKIP_FLAKY")) // TRFC-325
-  test("TimeoutFilter.module still times out requests when compensating") {
-    new Ctx {
-      metadata = Addr.Metadata("compensation" -> 2.seconds)
+    test("TimeoutFilter.module still times out requests when compensating") {
+      new Ctx {
+        metadata = Addr.Metadata("compensation" -> 2.seconds)
 
-      Time.withCurrentTimeFrozen { clock =>
-        whileConnected(compensatedEchoClient) { client =>
-          val sup = client("sup")
-          assert(!sup.isDefined)
-          assert(respond.interrupted == None)
+        Time.withCurrentTimeFrozen { clock =>
+          whileConnected(compensatedEchoClient) { client =>
+            val sup = client("sup")
+            assert(!sup.isDefined)
+            assert(respond.interrupted == None)
 
-          awaitReceipt()
-          assert(!sup.isDefined)
-          assert(respond.interrupted == None)
+            awaitReceipt()
+            assert(!sup.isDefined)
+            assert(respond.interrupted == None)
 
-          clock.advance(4.seconds)
-          timer.tick() // triggers the timeout
+            clock.advance(6.seconds)
+            timer.tick() // triggers the timeout
 
-          eventually {
-            assert(sup.isDefined)
-          }
-          assert(respond.interrupted.isDefined)
-          intercept[IndividualRequestTimeoutException] {
-            Await.result(sup, 10.seconds)
+            eventually {
+              assert(sup.isDefined)
+            }
+            assert(respond.interrupted.isDefined)
+            intercept[IndividualRequestTimeoutException] {
+              Await.result(sup, 10.seconds)
+            }
           }
         }
       }
     }
-  }
 
-  if (!sys.props.contains("SKIP_FLAKY")) // TRFC-325
   test("Latency compensator doesn't always add compensation") {
     new Ctx {
       Time.withCurrentTimeFrozen { clock =>
         whileConnected(compensatedEchoClient) { client =>
           val nm = client("nm")
           assert(!nm.isDefined)
-          assert(respond.interrupted == None)
+          assert(respond.interrupted.isEmpty)
 
           awaitReceipt()
           assert(!nm.isDefined)
-          assert(respond.interrupted == None)
+          assert(respond.interrupted.isEmpty)
 
           clock.advance(2.seconds)
           timer.tick() // triggers the timeout
@@ -246,7 +246,9 @@ class LatencyCompensationTest
           eventually {
             assert(nm.isDefined)
           }
-          assert(respond.interrupted.isDefined)
+          eventually {
+            assert(respond.interrupted.isDefined)
+          }
           intercept[IndividualRequestTimeoutException] {
             Await.result(nm, 10.seconds)
           }

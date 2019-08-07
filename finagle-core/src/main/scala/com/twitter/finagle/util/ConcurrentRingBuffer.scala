@@ -7,11 +7,6 @@ import scala.reflect.ClassTag
 /**
  * A simple, lock-free, non-blocking ring buffer.
  *
- * This differs from [[com.twitter.util.RingBuffer]] in that it is
- * simpler (fewer features), and is fully concurrent (and hence also
- * threadsafe). This should probably be  moved into util at some
- * point.
- *
  * '''Note:''' For very high-rate usages, sizing buffers by powers of
  * two may be advantageous.
  *
@@ -20,14 +15,14 @@ import scala.reflect.ClassTag
  * references (though this would require another allocation for each
  * item).
  */
-private[finagle] class ConcurrentRingBuffer[T : ClassTag](capacity: Int) {
+private[finagle] class ConcurrentRingBuffer[T: ClassTag](capacity: Int) {
   assert(capacity > 0)
 
   private[this] val nextRead, nextWrite = new AtomicLong(0)
   private[this] val publishedWrite = new AtomicLong(-1)
   private[this] val ring = new Array[T](capacity)
 
-  private[this] def publish(which: Long) {
+  private[this] def publish(which: Long): Unit = {
     while (publishedWrite.get != which - 1) {}
     val ok = publishedWrite.compareAndSet(which - 1, which)
     assert(ok)
@@ -48,8 +43,8 @@ private[finagle] class ConcurrentRingBuffer[T : ClassTag](capacity: Int) {
     if (w < r)
       return None
 
-    val el = ring((r%capacity).toInt)
-    if (nextRead.compareAndSet(r, r+1))
+    val el = ring((r % capacity).toInt)
+    if (nextRead.compareAndSet(r, r + 1))
       Some(el)
     else
       tryGet()
@@ -65,7 +60,7 @@ private[finagle] class ConcurrentRingBuffer[T : ClassTag](capacity: Int) {
     val r = nextRead.get
 
     if (w < r) None
-    else Some(ring((r%capacity).toInt))
+    else Some(ring((r % capacity).toInt))
   }
 
   /**
@@ -80,8 +75,9 @@ private[finagle] class ConcurrentRingBuffer[T : ClassTag](capacity: Int) {
     if (w - r >= capacity)
       return false
 
-    if (!nextWrite.compareAndSet(w, w+1)) tryPut(el) else {
-      ring((w%capacity).toInt) = el
+    if (!nextWrite.compareAndSet(w, w + 1)) tryPut(el)
+    else {
+      ring((w % capacity).toInt) = el
       publish(w)
       true
     }

@@ -1,9 +1,21 @@
 package com.twitter.finagle.service
 
-import com.twitter.conversions.time._
-import com.twitter.finagle.{ChannelClosedException, Failure, TimeoutException, WriteException}
+import com.twitter.conversions.DurationOps._
+import com.twitter.finagle.{
+  ChannelClosedException,
+  Failure,
+  FailureFlags,
+  TimeoutException,
+  WriteException
+}
 import com.twitter.util.{
-  TimeoutException => UtilTimeoutException, Duration, JavaSingleton, Return, Throw, Try}
+  Duration,
+  JavaSingleton,
+  Return,
+  Throw,
+  Try,
+  TimeoutException => UtilTimeoutException
+}
 import java.util.{concurrent => juc}
 import java.{util => ju}
 import scala.collection.JavaConverters._
@@ -16,9 +28,14 @@ import scala.collection.JavaConverters._
  * a [[Duration]] field for how long to wait for the next retry as well
  * as the next `RetryPolicy` to use.
  *
+ * Finagle will handle retryable Throws automatically but you will need to
+ * supply a custom [[ResponseClassifier]] to inform Finagle which application
+ * level exceptions are retryable.
+ *
  * @see [[SimpleRetryPolicy]] for a Java friendly API.
  */
 abstract class RetryPolicy[-A] extends (A => Option[(Duration, RetryPolicy[A])]) {
+
   /**
    * Creates a new `RetryPolicy` based on the current `RetryPolicy` in which values of `A`
    * are first checked against a predicate function, and only if the predicate returns true
@@ -92,9 +109,9 @@ abstract class RetryPolicy[-A] extends (A => Option[(Duration, RetryPolicy[A])])
  * A retry policy abstract class. This is convenient to use for Java programmers. Simply implement
  * the two abstract methods `shouldRetry` and `backoffAt` and you're good to go!
  */
-abstract class SimpleRetryPolicy[A](i: Int) extends RetryPolicy[A]
-  with (A => Option[(Duration, RetryPolicy[A])])
-{
+abstract class SimpleRetryPolicy[A](i: Int)
+    extends RetryPolicy[A]
+    with (A => Option[(Duration, RetryPolicy[A])]) {
   def this() = this(0)
 
   final def apply(e: A) = {
@@ -139,13 +156,20 @@ abstract class SimpleRetryPolicy[A](i: Int) extends RetryPolicy[A]
 }
 
 object RetryPolicy extends JavaSingleton {
+
+  /**
+   * An extractor for exceptions which are known to be safe to retry.
+   *
+   * @see [[RequeueFilter.Requeueable]]
+   */
   object RetryableWriteException {
     def unapply(thr: Throwable): Option[Throwable] = thr match {
       // We don't retry interruptions by default since they indicate that the
       // request was discarded.
-      case f: Failure if f.isFlagged(Failure.Interrupted) => None
-      case f: Failure if f.isFlagged(Failure.NonRetryable) => None
-      case f: Failure if f.isFlagged(Failure.Restartable) => Some(f.show)
+      case f: FailureFlags[_] if f.isFlagged(FailureFlags.Interrupted) => None
+      case f: FailureFlags[_] if f.isFlagged(FailureFlags.NonRetryable) => None
+      case f: Failure if f.isFlagged(FailureFlags.Retryable) => Some(f.show)
+      case f: FailureFlags[_] if f.isFlagged(FailureFlags.Retryable) => Some(f)
       case WriteException(exc) => Some(exc)
       case _ => None
     }
@@ -160,6 +184,10 @@ object RetryPolicy extends JavaSingleton {
     case Throw(RetryableWriteException(_)) => true
   }
 
+  /**
+   * Use [[ResponseClassifier.RetryOnTimeout]] composed with
+   * [[ResponseClassifier.RetryOnWriteExceptions]] for the [[ResponseClassifier]] equivalent.
+   */
   val TimeoutAndWriteExceptionsOnly: PartialFunction[Try[Nothing], Boolean] =
     WriteExceptionsOnly.orElse {
       case Throw(Failure(Some(_: TimeoutException))) => true
@@ -168,6 +196,9 @@ object RetryPolicy extends JavaSingleton {
       case Throw(_: UtilTimeoutException) => true
     }
 
+  /**
+   * Use [[ResponseClassifier.RetryOnChannelClosed]] for the [[ResponseClassifier]] equivalent.
+   */
   val ChannelClosedExceptionsOnly: PartialFunction[Try[Nothing], Boolean] = {
     case Throw(_: ChannelClosedException) => true
   }
@@ -196,14 +227,16 @@ object RetryPolicy extends JavaSingleton {
     policy: RetryPolicy[Try[Nothing]]
   ): RetryPolicy[(Req, Try[Rep])] =
     new RetryPolicy[(Req, Try[Rep])] {
-      def apply(input: (Req, Try[Rep])): Option[(Duration, RetryPolicy[(Req, Try[Rep])])] = input match {
-        case (_, t@Throw(_)) =>
-          policy(t.cast[Nothing]) match {
-            case Some((howlong, nextPolicy)) => Some((howlong, convertExceptionPolicy(nextPolicy)))
-            case None => None
-          }
-        case (_, Return(_)) => None
-      }
+      def apply(input: (Req, Try[Rep])): Option[(Duration, RetryPolicy[(Req, Try[Rep])])] =
+        input match {
+          case (_, t @ Throw(_)) =>
+            policy(t.cast[Nothing]) match {
+              case Some((howlong, nextPolicy)) =>
+                Some((howlong, convertExceptionPolicy(nextPolicy)))
+              case None => None
+            }
+          case (_, Return(_)) => None
+        }
     }
 
   /**
@@ -227,10 +260,7 @@ object RetryPolicy extends JavaSingleton {
    *   criteria of `shouldRetry`.
    * @param shouldRetry which `A`-typed values are considered retryable.
    */
-  def tries[A](
-    numTries: Int,
-    shouldRetry: PartialFunction[A, Boolean]
-  ): RetryPolicy[A] = {
+  def tries[A](numTries: Int, shouldRetry: PartialFunction[A, Boolean]): RetryPolicy[A] = {
     val backoffs = Backoff.decorrelatedJittered(5.millis, 200.millis)
     backoff[A](backoffs.take(numTries - 1))(shouldRetry)
   }
@@ -260,7 +290,8 @@ object RetryPolicy extends JavaSingleton {
    */
   def backoff[A](
     backoffs: Stream[Duration]
-  )(shouldRetry: PartialFunction[A, Boolean]): RetryPolicy[A] = {
+  )(shouldRetry: PartialFunction[A, Boolean]
+  ): RetryPolicy[A] = {
     RetryPolicy { e =>
       if (shouldRetry.applyOrElse(e, AlwaysFalse)) {
         backoffs match {

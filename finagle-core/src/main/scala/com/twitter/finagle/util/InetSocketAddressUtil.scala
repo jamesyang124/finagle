@@ -1,6 +1,7 @@
 package com.twitter.finagle.util
 
 import java.net.{InetAddress, InetSocketAddress, SocketAddress, UnknownHostException}
+import scala.collection.breakOut
 
 object InetSocketAddressUtil {
 
@@ -13,7 +14,8 @@ object InetSocketAddressUtil {
   def toPublic(bound: SocketAddress): SocketAddress = {
     bound match {
       case addr: InetSocketAddress if addr.getAddress().isAnyLocalAddress() =>
-        val host = try InetAddress.getLocalHost() catch {
+        val host = try InetAddress.getLocalHost()
+        catch {
           case _: UnknownHostException => InetAddress.getLoopbackAddress
         }
         new InetSocketAddress(host, addr.getPort())
@@ -33,7 +35,7 @@ object InetSocketAddressUtil {
    */
   def parseHostPorts(hosts: String): Seq[HostPort] =
     hosts split Array(' ', ',') filter (_.nonEmpty) map (_.split(":")) map { hp =>
-      require(hp.length == 2, "You must specify host and port")
+      require(hp.length == 2, s"You must specify host and port in hosts: $hosts")
       hp match {
         case Array(host, "*") => (host, 0)
         case Array(host, portStr) => (host, portStr.toInt)
@@ -53,10 +55,13 @@ object InetSocketAddressUtil {
     resolveHostPortsSeq(hostPorts).flatten.toSet
 
   private[finagle] def resolveHostPortsSeq(hostPorts: Seq[HostPort]): Seq[Seq[SocketAddress]] =
-    hostPorts map { case (host, port) =>
-      (InetAddress.getAllByName(host) map { addr =>
-        new InetSocketAddress(addr, port)
-      }).toSeq
+    hostPorts map {
+      case (host, port) =>
+        InetAddress
+          .getAllByName(host)
+          .map { addr =>
+            new InetSocketAddress(addr, port)
+          }(breakOut)
     }
 
   /**
@@ -72,11 +77,12 @@ object InetSocketAddressUtil {
   def parseHosts(hosts: String): Seq[InetSocketAddress] = {
     if (hosts == ":*") return Seq(new InetSocketAddress(0))
 
-    (parseHostPorts(hosts) map { case (host, port) =>
-      if (host == "")
-        new InetSocketAddress(port)
-      else
-        new InetSocketAddress(host, port)
-    }).toList
+    parseHostPorts(hosts).map[InetSocketAddress, List[InetSocketAddress]] {
+      case (host, port) =>
+        if (host == "")
+          new InetSocketAddress(port)
+        else
+          new InetSocketAddress(host, port)
+    }(breakOut)
   }
 }

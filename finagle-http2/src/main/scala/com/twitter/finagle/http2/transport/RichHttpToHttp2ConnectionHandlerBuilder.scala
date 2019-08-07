@@ -6,10 +6,12 @@ import io.netty.handler.codec.http2.Http2HeadersEncoder.SensitivityDetector
 // we need to supply no-op overrides for all of the methods to ensure the return
 // types are correct.
 private[http2] class RichHttpToHttp2ConnectionHandlerBuilder
-  extends AbstractHttp2ConnectionHandlerBuilder[
-    RichHttpToHttp2ConnectionHandler,
-    RichHttpToHttp2ConnectionHandlerBuilder
-  ] {
+    extends AbstractHttp2ConnectionHandlerBuilder[
+      RichHttpToHttp2ConnectionHandler,
+      RichHttpToHttp2ConnectionHandlerBuilder
+    ] {
+
+  private[this] var onActiveFn: Option[() => Unit] = None
 
   override def validateHeaders(
     validateHeaders: Boolean
@@ -72,8 +74,13 @@ private[http2] class RichHttpToHttp2ConnectionHandlerBuilder
     super.headerSensitivityDetector(headerSensitivityDetector)
   }
 
+  def onActive(fn: () => Unit): RichHttpToHttp2ConnectionHandlerBuilder = {
+    onActiveFn = Some(fn)
+    this
+  }
+
   override def build(): RichHttpToHttp2ConnectionHandler = {
-    super.build()
+    configureEncoder(super.build())
   }
 
   override protected def build(
@@ -81,6 +88,23 @@ private[http2] class RichHttpToHttp2ConnectionHandlerBuilder
     encoder: Http2ConnectionEncoder,
     initialSettings: Http2Settings
   ): RichHttpToHttp2ConnectionHandler = {
-    new RichHttpToHttp2ConnectionHandler(decoder, encoder, initialSettings)
+    val cn = connection()
+    val fn = onActiveFn.getOrElse(() => ())
+    configureEncoder(new RichHttpToHttp2ConnectionHandler(decoder, encoder, initialSettings, fn))
+  }
+
+  private[this] def configureEncoder(
+    handler: RichHttpToHttp2ConnectionHandler
+  ): RichHttpToHttp2ConnectionHandler = {
+    val encoderConfig = handler.encoder.configuration
+    val settings = super.initialSettings
+
+    val maxHeaderSize = settings.maxHeaderListSize
+    if (maxHeaderSize != null) encoderConfig.headersConfiguration.maxHeaderListSize(maxHeaderSize)
+
+    val maxFrameSize = settings.maxFrameSize
+    if (maxFrameSize != null) encoderConfig.frameSizePolicy.maxFrameSize(maxFrameSize)
+
+    handler
   }
 }

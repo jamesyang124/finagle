@@ -1,18 +1,15 @@
 package com.twitter.finagle.pool
 
-import com.twitter.conversions.time._
+import com.twitter.conversions.DurationOps._
 import com.twitter.finagle._
 import com.twitter.finagle.stats.InMemoryStatsReceiver
 import com.twitter.util.{Await, Future, Promise, Return, Throw, Time}
-import org.junit.runner.RunWith
 import org.mockito.Matchers.any
 import org.mockito.Mockito.{never, times, verify, when}
 import org.scalatest.FunSpec
-import org.scalatest.junit.JUnitRunner
-import org.scalatest.mock.MockitoSugar
+import org.scalatest.mockito.MockitoSugar
 import scala.language.reflectiveCalls
 
-@RunWith(classOf[JUnitRunner])
 class WatermarkPoolTest extends FunSpec with MockitoSugar {
   describe("A WatermarkPool") {
     it("should reflect the underlying availability") {
@@ -81,7 +78,6 @@ class WatermarkPoolTest extends FunSpec with MockitoSugar {
       val pool = new WatermarkPool(factory, 1, 1)
     }
 
-
     it("should enqueue requests when we have already allocated one item") {
       new WatermarkPoolLowOneHighOne {
         val f0 = pool()
@@ -138,7 +134,7 @@ class WatermarkPoolTest extends FunSpec with MockitoSugar {
         assert(f1.isDefined)
         val failure = intercept[Failure] { Await.result(f1) }
         assert(failure.getCause.isInstanceOf[CancelledConnectionException])
-        assert(failure.isFlagged(Failure.Interrupted))
+        assert(failure.isFlagged(FailureFlags.Interrupted))
       }
     }
 
@@ -270,17 +266,20 @@ class WatermarkPoolTest extends FunSpec with MockitoSugar {
         when(service.status).thenReturn(Status.Open)
       }
 
-      mocks zip services foreach { case (mock, service) =>
-        service.close()
-        verify(mock).status
-        verify(mock, never()).close(any[Time])
+      mocks zip services foreach {
+        case (mock, service) =>
+          service.close()
+          verify(mock).status
+          verify(mock, never()).close(any[Time])
       }
     }
 
     it("should return the cached connections for the next 100 apply calls") {
       // We can now fetch them again, incurring no additional object
       // creation.
-      0 until 100 foreach { _ => Await.result(pool()) }
+      0 until 100 foreach { _ =>
+        Await.result(pool())
+      }
       mocks foreach { service =>
         verify(service, times(2)).status
       }
@@ -293,6 +292,7 @@ class WatermarkPoolTest extends FunSpec with MockitoSugar {
   }
 
   trait WatermarkPoolLowOneHighFive {
+    val sr = new InMemoryStatsReceiver
     val factory = mock[ServiceFactory[Int, Int]]
     when(factory.close(any[Time])).thenReturn(Future.Done)
     val service = mock[Service[Int, Int]]
@@ -300,10 +300,80 @@ class WatermarkPoolTest extends FunSpec with MockitoSugar {
     when(service.status).thenReturn(Status.Open)
     when(service(123)).thenReturn(Future.value(321))
     val highWaterMark = 5
-    val pool = new WatermarkPool(factory, 1, highWaterMark)
+    val pool = new WatermarkPool(factory, 1, highWaterMark, sr)
   }
 
   describe("Watermark service lifecyle") {
+    it("is resilient to multiple closes on a single service instance") {
+      val svcFac = new ServiceFactory[Int, Int] {
+        def apply(conn: ClientConnection): Future[Service[Int, Int]] =
+          Future.value(Service.mk[Int, Int](Future.value(_)))
+
+        def close(deadline: Time): Future[Unit] = Future.Done
+      }
+      val sr = new InMemoryStatsReceiver
+      val wmp = new WatermarkPool[Int, Int](svcFac, 0, 5, sr)
+
+      val svc1 = Await.result(wmp(), 5.seconds)
+      assert(wmp.size == 1)
+      val svc2 = Await.result(wmp(), 5.seconds)
+      assert(wmp.size == 2)
+      val svc3 = Await.result(wmp(), 5.seconds)
+      assert(wmp.size == 3)
+
+      Await.ready(svc3.close(), 5.seconds)
+      assert(wmp.size == 2)
+
+      // closing the same instance again, is a no-op
+      Await.ready(svc3.close(), 5.seconds)
+      assert(wmp.size == 2)
+
+      val svc4 = Await.result(wmp(), 5.seconds)
+      assert(wmp.size == 3)
+
+      // another no-op on the already closed svc3
+      Await.ready(svc3.close(), 5.seconds)
+      assert(wmp.size == 3)
+
+      // first close on svc4
+      Await.ready(svc4.close(), 5.seconds)
+      assert(wmp.size == 2)
+
+      // first close on svc2
+      Await.ready(svc2.close(), 5.seconds)
+      assert(wmp.size == 1)
+
+      // first close on svc1
+      Await.ready(svc1.close(), 5.seconds)
+      assert(wmp.size == 0)
+    }
+
+    it("allows service reuse without messing up pool accounting") {
+      val svcFac = new ServiceFactory[Int, Int] {
+        def apply(conn: ClientConnection): Future[Service[Int, Int]] =
+          Future.value(Service.mk[Int, Int](Future.value(_)))
+
+        def close(deadline: Time): Future[Unit] = Future.Done
+      }
+      val sr = new InMemoryStatsReceiver
+      val wmp = new WatermarkPool[Int, Int](svcFac, 0, 1, sr)
+
+      assert(wmp.size == 0)
+      val svc1 = Await.result(wmp(), 5.seconds)
+      assert(wmp.size == 1)
+      val waitingSvc = wmp()
+      Await.result(svc1.close(), 5.seconds)
+      assert(wmp.size == 1) // we have a waiter so the service should go back in the pool
+      val svc2 = Await.result(waitingSvc, 5.seconds)
+
+      // double-closing first service is a no-op
+      Await.ready(svc1.close(), 5.seconds)
+      assert(wmp.size == 1)
+
+      Await.result(svc2.close(), 5.seconds)
+      assert(wmp.size == 0)
+    }
+
     it("should not leak services when they are born unhealthy") {
       new WatermarkPoolLowOneHighFive {
         (0 until highWaterMark) foreach { _ =>
@@ -331,7 +401,6 @@ class WatermarkPoolTest extends FunSpec with MockitoSugar {
         verify(factory)()
         assert(f.isDefined)
         assert(Await.result(f).status == Status.Open)
-
 
         Await.result(f).close()
         verify(service, never()).close(any[Time])
@@ -393,7 +462,9 @@ class WatermarkPoolTest extends FunSpec with MockitoSugar {
         when(factory()).thenReturn(s)
         pool()
       }
-      0 until maxWaiters map { _ => pool() }
+      0 until maxWaiters map { _ =>
+        pool()
+      }
       val f = pool()
       assert(f.isDefined)
       intercept[TooManyWaitersException] { Await.result(f) }
@@ -411,9 +482,11 @@ class WatermarkPoolTest extends FunSpec with MockitoSugar {
       new WatermarkPoolLowOneHighFive {
         when(factory()).thenReturn(Future.value(service))
         val s = Await.result(pool())
+        assert(pool.size == 1)
         s.close()
         verify(service, never()).close(any[Time])
         pool.close()
+        assert(pool.size == 0)
         verify(service).close(any[Time])
       }
     }

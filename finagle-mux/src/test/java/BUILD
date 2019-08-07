@@ -1,9 +1,9 @@
 junit_tests(
-  dependencies=[
-    'finagle/finagle-mux',
-    'util/util-core',
-    'finagle/finagle-core/src/main/scala:scala',
-  ],
-  fatal_warnings=True,
-  sources=rglobs('*.java')
+    sources = rglobs("*.java"),
+    compiler_option_sets = {"fatal_warnings"},
+    dependencies = [
+        "finagle/finagle-core",
+        "finagle/finagle-mux",
+        "util/util-core",
+    ],
 )

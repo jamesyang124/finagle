@@ -1,6 +1,6 @@
 package com.twitter.finagle.serverset2
 
-import com.twitter.conversions.time._
+import com.twitter.conversions.DurationOps._
 import com.twitter.finagle.serverset2.ServiceDiscoverer.ClientHealth
 import com.twitter.finagle.stats.InMemoryStatsReceiver
 import com.twitter.util._
@@ -16,7 +16,7 @@ class HealthStabilizerTest extends FunSuite with BeforeAndAfter {
   val unhealthy = Var.value[ClientHealth](ClientHealth.Unhealthy)
 
   val timer = new MockTimer
-  val limboEpoch = Epoch(10.seconds)(timer)
+  val limboEpoch = Epoch(10.seconds, timer)
   var closeMe = Closable.nop
   val stats = new InMemoryStatsReceiver()
 

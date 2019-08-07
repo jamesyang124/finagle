@@ -1,18 +1,14 @@
 package com.twitter.finagle.netty4.channel
 
-import com.twitter.finagle.CancelledConnectionException
 import io.netty.channel.ChannelOutboundHandlerAdapter
 import io.netty.channel.embedded.EmbeddedChannel
-import org.junit.runner.RunWith
-import org.scalatest.junit.JUnitRunner
 import org.scalatest.FunSuite
 
-@RunWith(classOf[JUnitRunner])
 class ConnectPromiseDelayListenersTest extends FunSuite {
 
-  class Ctx extends ChannelOutboundHandlerAdapter
-      with BufferingChannelOutboundHandler
-      with ConnectPromiseDelayListeners {
+  import ConnectPromiseDelayListeners._
+
+  class Ctx extends ChannelOutboundHandlerAdapter with BufferingChannelOutboundHandler {
 
     val channel = new EmbeddedChannel(this)
 
@@ -32,14 +28,8 @@ class ConnectPromiseDelayListenersTest extends FunSuite {
   test("cancel when cancelled (already succeed)") {
     new Ctx {
       p1.addListener(proxyCancellationsTo(p2, ctx))
-      channel.writeOutbound("foo")
-
       p2.setSuccess()
       p1.cancel(false)
-
-      assert(intercept[Exception](
-        channel.checkException()).isInstanceOf[CancelledConnectionException]
-      )
       assert(!channel.isOpen)
     }
   }

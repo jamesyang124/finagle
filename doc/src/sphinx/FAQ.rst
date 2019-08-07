@@ -53,12 +53,12 @@ A simplified code snippet that exemplifies the intra-process structure:
        However, this will still hold if the client call was in the context
        of a Future combinator (ex. `Future#select`, `Future#join`, etc.)
 
-This is the source of the :API:`CancelledRequestException <com.twitter.finagle.CancelledRequestException>` --
+This is the source of the :API:`CancelledRequestException <com/twitter/finagle/CancelledRequestException>` --
 when a Finagle client receives the cancellation interrupt while a request is pending, it
 fails that request with this exception. A special case of this is when a request is in the process
-of establishing a session and is instead interrupted with a :API:`CancelledConnectException <com.twitter.finagle.CancelledConnectException>`
+of establishing a session and is instead interrupted with a :API:`CancelledConnectionException <com/twitter/finagle/CancelledConnectionException>`
 
-You can disable this behavior by using the :API:`MaskCancelFilter <com.twitter.finagle.filter.MaskCancelFilter>`:
+You can disable this behavior by using the :API:`MaskCancelFilter <com/twitter/finagle/filter/MaskCancelFilter>`:
 
 .. code-block:: scala
 
@@ -95,16 +95,16 @@ finagle-thrift{,mux}, you will still need it for our patched libthrift.
 How do I configure clients and servers with Finagle 6 APIs?
 ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
 
-As of :doc:`6.x <changelog>`, We introduced a new, preferred API for constructing Finagle
-``Client``\s and ``Server``\s. Where the old API used ``ServerBuilder``\/``ClientBuilder``
-with ``Codec``\s, the new APIs use ``Protocol.client.newClient`` and ``Protocol.server.serve`` [#]_.
+As of :doc:`Finagle 6.x <changelog>`, we introduced a new, preferred API for constructing Finagle
+``Client``\s and ``Server``\s. Where the old API used ``ServerBuilder``\/``ClientBuilder``,
+the new APIs use ``$Protocol.client.newClient`` and ``$Protocol.server.serve`` [#]_.
 
 Old ``ClientBuilder`` APIs:
 
 .. code-block:: scala
 
+  import com.twitter.finagle.Http
   import com.twitter.finagle.builder.ClientBuilder
-  import com.twitter.finagle.http.Http
   import com.twitter.finagle.stats.StatsReceiver
   import com.twitter.finagle.tracing.Tracer
   import com.twitter.util.Duration
@@ -115,7 +115,7 @@ Old ``ClientBuilder`` APIs:
   val connectTimeout: Duration = ???
 
   val client = ClientBuilder()
-    .codec(Http)
+    .stack(Http.client)
     .name("clientname")
     .reportTo(statsReceiver)
     .tracer(tracer)
@@ -157,8 +157,7 @@ More configuration options and the details about them are available for
 Additionally, the Scaladocs for most methods on ``ServerBuilder`` and
 ``ClientBuilder`` include the Stack-based API's alternative. A few methods do
 not yet have one-to-one equivalents, such as ``ClientBuilder.retries`` and
-for these you should continue to use ``ClientBuilder`` along with the
-``ClientBuilder.stack`` method.
+for these you should :ref:`migrate <mb_cb_migration>` to using ``MethodBuilder``.
 
 .. [#] Protocol implementors are encouraged to provide sensible
        defaults and leave room for application specific behavior
@@ -191,10 +190,14 @@ What is a com.twitter.finagle.service.ResponseClassificationSyntheticException?
 
 While typically, a :src:`StatsFilter <com/twitter/finagle/service/StatsFilter.scala>` counts
 `Exceptions` as failures, a user may supply a
-`ResponseClassifier <http://twitter.github.io/finagle/guide/Clients.html#response-classification>`_
+`ResponseClassifier <https://twitter.github.io/finagle/guide/Clients.html#response-classification>`_
 that treats non-Exceptions as failures. In that case, while no exceptions have occurred, a
 `ResponseClassificationSyntheticException` is used as a "synthetic" exception for
 bookkeeping purposes.
+
+One specific example can be seen when using the ThriftResponseClassifier.ThriftExceptionsAsFailures.
+Successful ThriftResponses which deserialize into Thrift Exceptions use this exception to
+be counted as failures in StatsFilter.
 
 How long should my Clients live?
 ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
@@ -208,6 +211,73 @@ with many other non-fungible services, in which it makes sense to proliferate cl
 created, used, and thrown away, but in the vast majority of cases, clients should be persistent,
 not ephemeral.
 
+When can I use a null?
+~~~~~~~~~~~~~~~~~~~~~~
+
+None of Finagle's APIs admits nulls unless noted otherwise.  Finagle is written in Scala, and by
+convention, we use Scala `Options` when a parameter or a result is optional.
+
+Where is time spent in the client stack?
+~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
+
+Finagle's :ref:`clients  <client_modules>` and :ref:`servers <server_modules>`
+have many modules that are tasked with a wide assortment of jobs. When there
+is unexpected latency, it can be useful to have visibility into where time
+is spent. Finagle's `RequestLogger` can help with this. It can be enabled by
+setting the ``com.twitter.finagle.request.Logger`` level to ``TRACE`` and
+enabling the stack param:
+
+.. code-block:: scala
+
+  // scala
+  import com.twitter.finagle.filter.RequestLogger
+
+  Protocol.client.configured(RequestLogger.Enabled)
+  Protocol.server.configured(RequestLogger.Enabled)
+
+.. code-block:: java
+
+  // java
+  import com.twitter.finagle.filter.RequestLogger;
+
+  Protocol.client.configured(RequestLogger.Enabled().mk());
+  Protocol.server.configured(RequestLogger.Enabled().mk());
+
+The logs include synchronous and asynchronous time for each stack module's
+`Filter`. Synchronous here means the time spent from the beginning of the
+`Filter.apply` call to when the `Future` is returned from the `Filter`.
+Asynchronous here is how long it takes from the beginning of the
+`Filter.apply` call to when the returned `Future` is satisfied.
+
+As an example, given this stack module with the name "slow-down-module":
+
+.. code-block:: scala
+
+  import com.twitter.conversions.DurationOps._
+  import com.twitter.finagle.Filter
+  import com.twitter.finagle.util.DefaultTimer
+
+  class SlowFilterDoNotUse extends Filter[Int, Int, Int, Int] {
+    def apply(request: Int, service: Service[Int, Int]): Future[Int] = {
+      // this delays the synchronous path
+      Thread.sleep(1.second.inMilliseconds)
+
+      // the call to `Future.delayed` delays the asynchronous path
+      service(request).delayed(500.milliseconds)(DefaultTimer)
+    }
+  }
+
+The output of `RequestLogger` would look something like:
+
+.. code-block:: none
+
+  traceId=b07d63561ed1a9b9.b07d63561ed1a9b9<:b07d63561ed1a9b9 server-name slow-down-module begin
+  traceId=b07d63561ed1a9b9.b07d63561ed1a9b9<:b07d63561ed1a9b9 server-name slow-down-module end cumulative sync elapsed 1000025 us
+  traceId=b07d63561ed1a9b9.b07d63561ed1a9b9<:b07d63561ed1a9b9 server-name slow-down-module end cumulative async elapsed 1500045 us
+
+There will be these lines for every stack module and the log format is:
+*traceId=$traceId $client-or-server-label $module-name*.
+
 Mux-specific FAQ
 ----------------
 
@@ -218,7 +288,7 @@ What service behavior will change when upgrading to Mux?
 
 With Mux, Finagle multiplexes several requests onto a single connection. As a
 consequence, traditional forms of connection-pooling are no longer required. Thus
-Mux employs `com.twitter.finagle.pool.SingletonPool <http://twitter.github.io/finagle/docs/#com.twitter.finagle.pool.SingletonPool>`_,
+Mux employs :API:`SingletonPool <com/twitter/finagle/pool/SingletonPool>`,
 which exposes new stats:
 
 - ``connects``, ``connections``, and ``closes`` stats should drop, since
@@ -234,7 +304,7 @@ which exposes new stats:
 
 *ClientBuilder configuration*
 
-Certain `ClientBuilder <http://twitter.github.io/finagle/docs/#com.twitter.finagle.builder.ClientBuilder>`_
+Certain :API:`ClientBuilder <com/twitter/finagle/builder/ClientBuilder>`
 settings related to connection pooling become obsolete:
 ``hostConnectionCoresize``, ``hostConnectionLimit``, ``hostConnectionIdleTime``,
 ``hostConnectionMaxWaiters``, and ``expHostConnectionBufferSize``
@@ -250,7 +320,7 @@ be impacted:
 - Obsolete stats: ``idle/idle``, ``idle/refused``, and ``idle/closed``
 
 *ServerBuilder configuration*
-Certain `ServerBuilder <http://twitter.github.io/finagle/docs/#com.twitter.finagle.builder.ServerBuilder>`_
+Certain :API:`ServerBuilder <com/twitter/finagle/builder/ServerBuilder>`
 connection management settings become obsolete: ``openConnectionsThresholds``.
 
 What is ThriftMux?
@@ -258,5 +328,5 @@ What is ThriftMux?
 
 .. _whats_thriftmux:
 
-`ThriftMux <http://twitter.github.io/finagle/docs/#com.twitter.finagle.ThriftMux$>`_
+:API:`ThriftMux <com/twitter/finagle/ThriftMux$>`
 is an implementation of the Thrift protocol built on top of Mux.

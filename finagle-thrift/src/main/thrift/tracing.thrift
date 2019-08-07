@@ -1,6 +1,6 @@
-/* 
-		CHANGING THIS FILE REQUIRES MANUAL REGENERATION 
-		
+/*
+		CHANGING THIS FILE REQUIRES MANUAL REGENERATION
+
 E.g.:
 
 thrift --gen java tracing.thrift
@@ -45,6 +45,7 @@ const string CLIENT_SEND = "cs"
  * recorded separately as SERVER_ADDR when CLIENT_SEND is logged.
  */
 const string CLIENT_RECV = "cr"
+const string CLIENT_RECV_ERROR = "Client Receive Error"
 /**
  * The server sent ("ss") a response to a client. There is only one response
  * per span. If there's a transport error, each attempt can be logged as a
@@ -61,6 +62,7 @@ const string CLIENT_RECV = "cr"
  * recorded separately as CLIENT_ADDR when SERVER_RECV is logged.
  */
 const string SERVER_SEND = "ss"
+const string SERVER_SEND_ERROR = "Server Send Error"
 /**
  * The server received ("sr") a request from a client. There is only one
  * request per span.  For example, if duplicate responses were received, each
@@ -89,6 +91,7 @@ const string WIRE_SEND = "ws"
  * and client or server receive might indicate queuing or processing delay.
  */
 const string WIRE_RECV = "wr"
+const string WIRE_RECV_ERROR = "Wire Receive Error"
 /**
  * Optionally logs progress of a (CLIENT_SEND, WIRE_SEND). For example, this
  * could be one chunk in a chunked request.
@@ -204,9 +207,13 @@ struct Span {
   3: string name,                  // span name, rpc method for example
   4: i64 id,                       // unique span id, only used for this span
   5: optional i64 parent_id,                // parent span id
-  6: list<Annotation> annotations, // list of all annotations/events that occured, sorted by timestamp
+  6: list<Annotation> annotations, // list of all annotations/events that occurred, sorted by timestamp
   8: list<BinaryAnnotation> binary_annotations, // any binary annotations
-  9: bool debug                    // if true, we DEMAND that this span passes all samplers
+  9: bool debug,                  // if true, we DEMAND that this span passes all samplers
+  10: optional i64 timestamp      // the time at which the span was generated
+  11: optional i64 duration       // measurement in microseconds of the critical path, if known
+  12: optional i64 trace_id_high  // the optional high 64 bits of a 128 bit identifier
+                                  // (must be non-zero if present)
 }
 
 
@@ -255,6 +262,7 @@ struct RequestHeader {
   // Support for destination (partially resolved names) and delegation tables.
   9: optional string dest
   10: optional list<Delegation> delegations
+  11: optional i64 trace_id_high
 }
 
 /**

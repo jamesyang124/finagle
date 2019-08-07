@@ -1,19 +1,24 @@
 package com.twitter.finagle.util
 
 /**
- * Maintain an exponential moving average of Long-typed values over a
+ * Maintain an exponential moving average of Double-typed values over a
  * given window on a user-defined clock.
  *
- * Ema requires monotonic timestamps. A monotonic
- * time source is available at [[Ema.Monotime]].
+ * `Ema` requires monotonic timestamps. A monotonic
+ * time source is available at `Ema.Monotime`.
+ *
+ * This class is NOT thread safe and requires synchronization around both
+ * the timestamp generation and calls to update.
  *
  * @param window The mean lifetime of observations.
  */
 private[finagle] class Ema(window: Long) {
+  // as noted above, thread safety must be handled external to the class.
   private[this] var time = Long.MinValue
-  private[this] var ema = 0D
 
-  def isEmpty: Boolean = synchronized { time < 0 }
+  // this is volatile to allow read-only calls to `last`
+  // without needing synchronization.
+  @volatile private[this] var ema = 0.0
 
   /**
    * Update the average with observed value `x`, and return the new average.
@@ -21,32 +26,35 @@ private[finagle] class Ema(window: Long) {
    * Since `update` requires monotonic timestamps, it is up to the caller to
    * ensure that calls to update do not race.
    */
-  def update(stamp: Long, x: Long): Double = synchronized {
+  def update(stamp: Long, x: Double): Double = {
     if (time == Long.MinValue) {
       time = stamp
       ema = x
+      x
     } else {
-      val td = stamp-time
+      val td = stamp - time
       assert(td >= 0, "Nonmonotonic timestamp")
       time = stamp
-      val w = if (window == 0) 0 else math.exp(-td.toDouble/window)
-      ema = x*(1-w) + ema*w
+      val w = if (window == 0.0) 0.0 else math.exp(-td.toDouble / window)
+      val newEma = x * (1 - w) + ema * w
+      ema = newEma
+      newEma
     }
-    ema
   }
 
   /**
-   * Return the last observation. This is generally only safe to use if you
-   * control your own clock, since the current value depends on it.
+   * Return the last observation.
+   *
+   * @note This is safe to call without synchronization.
    */
-  def last: Double = synchronized { ema }
+  def last: Double = ema
 
   /**
    * Reset the average to 0 and erase all observations.
    */
-  def reset(): Unit = synchronized {
+  def reset(): Unit = {
     time = Long.MinValue
-    ema = 0
+    ema = 0.0
   }
 }
 
@@ -58,19 +66,27 @@ private[finagle] object Ema {
    * any specific wall clock time, and it should only be used for checking
    * elapsed time.
    *
-   * Call `nanos` to sample.
+   * Call `nanos` to sample. This class is not thread safe. Also, when used to
+   * generate a timestamp for Ema#update, both the timestamp generation and
+   * update must occur atomically:
    *
-   * TODO: stops increasing if it overflows.
+   * {{{
+   * val ema = new Ema()
+   * val monotime = new Ema.Monotime()
+   * ...
+   * def update(x: Long): Unit = synchronized {
+   *   ema.update(monotime.nanos(), x)
+   * }
+   * }}}
    */
   class Monotime {
-     private[this] var last = System.nanoTime()
+    private[this] var last = System.nanoTime()
 
-    def nanos(): Long = synchronized {
+    def nanos(): Long = {
       val sample = System.nanoTime()
       if (sample - last > 0)
         last = sample
       last
     }
-
   }
 }

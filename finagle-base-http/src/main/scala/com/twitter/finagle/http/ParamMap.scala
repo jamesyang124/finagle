@@ -1,9 +1,7 @@
 package com.twitter.finagle.http
 
 import com.twitter.finagle.http.util.StringUtil
-import java.nio.charset.Charset
 import java.util.{List => JList, Map => JMap}
-import org.jboss.netty.handler.codec.http.{QueryStringDecoder, QueryStringEncoder}
 import scala.collection.immutable
 import scala.collection.JavaConverters._
 
@@ -15,8 +13,8 @@ import scala.collection.JavaConverters._
  * Use `getAll()` to get all values for a key.
  */
 abstract class ParamMap
-  extends immutable.Map[String, String]
-  with immutable.MapLike[String, String, ParamMap] {
+    extends immutable.Map[String, String]
+    with immutable.MapLike[String, String, ParamMap] {
 
   /**
    * Add a key/value pair to the map, returning a new map.
@@ -111,21 +109,12 @@ abstract class ParamMap
       case None => default
     }
 
-  override def toString: String = {
-    val encoder = new QueryStringEncoder("", Charset.forName("utf-8"))
-    iterator.foreach { case (k, v) =>
-      encoder.addParam(k, v)
-    }
-    encoder.toString
-  }
+  override def toString: String = QueryParamEncoder.encode(this)
 }
 
-
 /** Map-backed ParamMap. */
-class MapParamMap(
-    underlying: Map[String, Seq[String]],
-    val isValid: Boolean = true)
-  extends ParamMap {
+class MapParamMap(underlying: Map[String, Seq[String]], val isValid: Boolean = true)
+    extends ParamMap {
 
   def get(name: String): Option[String] =
     underlying.get(name) match {
@@ -137,8 +126,7 @@ class MapParamMap(
     underlying.getOrElse(name, Nil)
 
   def iterator: Iterator[(String, String)] = {
-    for ((k, vs) <- underlying.iterator; v <- vs) yield
-      (k, v)
+    for ((k, vs) <- underlying.iterator; v <- vs) yield (k, v)
   }
 
   override def keySet: Set[String] =
@@ -148,23 +136,23 @@ class MapParamMap(
     underlying.keysIterator
 }
 
-
 object MapParamMap {
-  def apply(params: Tuple2[String, String]*): MapParamMap =
+  def apply(params: (String, String)*): MapParamMap =
     new MapParamMap(MapParamMap.tuplesToMultiMap(params))
 
   def apply(map: Map[String, String]): MapParamMap =
-    new MapParamMap(map.mapValues { value => Seq(value) })
+    new MapParamMap(map.mapValues { value =>
+      Seq(value)
+    })
 
-  private[http] def tuplesToMultiMap(
-    tuples: Seq[Tuple2[String, String]]
-  ): Map[String, Seq[String]] = {
+  private[http] def tuplesToMultiMap(tuples: Seq[(String, String)]): Map[String, Seq[String]] = {
     tuples
       .groupBy { case (k, v) => k }
-      .mapValues { values => values.map { _._2 } }
+      .mapValues { values =>
+        values.map { _._2 }
+      }
   }
 }
-
 
 /** Empty ParamMap */
 object EmptyParamMap extends ParamMap {
@@ -176,10 +164,14 @@ object EmptyParamMap extends ParamMap {
 }
 
 /**
- * HttpRequest-backed param map.  Handle parameters in the URL and form encoded
- * body.  Multipart forms are not supported (not needed, could be abusive).
+ * Http [[Request]]-backed [[ParamMap]]. This [[ParamMap]] contains both
+ * parameters provided as part of the request URI and parameters provided
+ * as part of the request body.
  *
- * This map is a multi-map.  Use getAll() to get all values for a key.
+ * @note Request body parameters are considered if the following criteria are true:
+ *   1. The request is not a TRACE request.
+ *   2. The request media type is 'application/x-www-form-urlencoded'
+ *   3. The content length is greater than 0.
  */
 class RequestParamMap(val request: Request) extends ParamMap {
   override def isValid: Boolean = _isValid
@@ -191,8 +183,8 @@ class RequestParamMap(val request: Request) extends ParamMap {
 
   private[this] val postParams: JMap[String, JList[String]] = {
     if (request.method != Method.Trace &&
-        request.mediaType.contains(MediaType.WwwForm) &&
-        request.length > 0) {
+      request.mediaType.contains(MediaType.WwwForm) &&
+      request.length > 0) {
       parseParams("?" + request.contentString)
     } else {
       ParamMap.EmptyJMap
@@ -202,10 +194,9 @@ class RequestParamMap(val request: Request) extends ParamMap {
   // Convert IllegalArgumentException to ParamMapException so it can be handled
   // appropriately (e.g., 400 Bad Request).
   private[this] def parseParams(s: String): JMap[String, JList[String]] = {
-    try {
-      new QueryStringDecoder(s).getParameters
-    } catch {
-      case e: IllegalArgumentException =>
+    try QueryParamDecoder.decode(s)
+    catch {
+      case _: IllegalArgumentException =>
         _isValid = false
         ParamMap.EmptyJMap
     }
@@ -219,7 +210,7 @@ class RequestParamMap(val request: Request) extends ParamMap {
   /** Get value */
   def get(name: String): Option[String] =
     jget(postParams, name) match {
-      case None  => jget(getParams, name)
+      case None => jget(getParams, name)
       case value => value
     }
 
@@ -261,10 +252,10 @@ class RequestParamMap(val request: Request) extends ParamMap {
     }.toIterator
 }
 
-
 object ParamMap {
+
   /** Create ParamMap from parameter list. */
-  def apply(params: Tuple2[String, String]*): ParamMap =
+  def apply(params: (String, String)*): ParamMap =
     MapParamMap(params: _*)
 
   /** Create ParamMap from a map. */
@@ -273,8 +264,16 @@ object ParamMap {
 
   private[http] val EmptyJMap = new java.util.HashMap[String, JList[String]]
 
-  private val ToShort = { s: String => StringUtil.toSomeShort(s) }
-  private val ToInt = { s: String => StringUtil.toSomeInt(s) }
-  private val ToLong = { s: String => StringUtil.toSomeLong(s) }
-  private val ToBoolean = { s: String => StringUtil.toBoolean(s) }
+  private val ToShort = { s: String =>
+    StringUtil.toSomeShort(s)
+  }
+  private val ToInt = { s: String =>
+    StringUtil.toSomeInt(s)
+  }
+  private val ToLong = { s: String =>
+    StringUtil.toSomeLong(s)
+  }
+  private val ToBoolean = { s: String =>
+    StringUtil.toBoolean(s)
+  }
 }

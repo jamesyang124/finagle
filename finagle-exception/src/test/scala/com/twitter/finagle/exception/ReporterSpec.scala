@@ -9,7 +9,7 @@ import org.mockito.Matchers.anyObject
 import org.mockito.Mockito._
 import org.scalatest.FunSuite
 import org.scalatest.junit.JUnitRunner
-import org.scalatest.mock.MockitoSugar
+import org.scalatest.mockito.MockitoSugar
 
 @RunWith(classOf[JUnitRunner])
 class DefaultReporterTest extends FunSuite with MockitoSugar {
@@ -44,8 +44,11 @@ class ClientReporterTest extends FunSuite with MockitoSugar {
 
   val reporter = Reporter(logger, "service16").withClient()
 
-  val tse = new TestServiceException("service16", "my cool message",
-    clientAddress = Some(InetAddress.getLoopbackAddress.getHostAddress))
+  val tse = new TestServiceException(
+    "service16",
+    "my cool message",
+    clientAddress = Some(InetAddress.getLoopbackAddress.getHostAddress)
+  )
 
   test("log entries to a client once upon receive") {
     reporter.handle(tse.throwable)
@@ -72,8 +75,12 @@ class SourceClientReporterTest extends FunSuite with MockitoSugar {
     .withSource(socket)
     .withClient()
 
-  val tse = new TestServiceException("service16", "my cool message",
-    clientAddress = Some(InetAddress.getLoopbackAddress.getHostAddress), sourceAddress = Some(socket.getAddress.getHostName))
+  val tse = new TestServiceException(
+    "service16",
+    "my cool message",
+    clientAddress = Some(InetAddress.getLoopbackAddress.getHostAddress),
+    sourceAddress = Some(socket.getAddress.getHostName)
+  )
 
   test("log entries to a client once upon receive") {
     reporter.handle(tse.throwable)
@@ -107,8 +114,11 @@ class ExceptionReporterTest extends FunSuite with MockitoSugar {
     when(logger.log(anyObject())).thenReturn(Future.value(ResultCode.Ok))
     val captor = ArgumentCaptor.forClass(classOf[Seq[LogEntry]])
     val socket = new InetSocketAddress(InetAddress.getLoopbackAddress, 0)
-    val tse = new TestServiceException("service", "my cool message",
-      clientAddress = Some(socket.getAddress.getHostName))
+    val tse = new TestServiceException(
+      "service",
+      "my cool message",
+      clientAddress = Some(socket.getAddress.getHostName)
+    )
 
     val reporter = new ExceptionReporter().apply("service", Some(socket))
     reporter.copy(client = logger).handle(tse.throwable)

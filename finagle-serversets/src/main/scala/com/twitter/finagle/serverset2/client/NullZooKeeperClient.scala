@@ -1,6 +1,6 @@
 package com.twitter.finagle.serverset2.client
 
-import com.twitter.conversions.time._
+import com.twitter.conversions.DurationOps._
 import com.twitter.finagle.serverset2.client.Data.Stat
 import com.twitter.finagle.serverset2.client.Node.{ACL, Children}
 import com.twitter.io.Buf
@@ -49,7 +49,11 @@ trait NullZooKeeperMulti extends ZooKeeperMulti with NullZooKeeperClient {
 }
 
 trait NullZooKeeperRW extends ZooKeeperRW with NullZooKeeperReader with NullZooKeeperWriter
-trait NullZooKeeperRWMulti extends ZooKeeperRWMulti with NullZooKeeperReader with NullZooKeeperWriter with NullZooKeeperMulti
+trait NullZooKeeperRWMulti
+    extends ZooKeeperRWMulti
+    with NullZooKeeperReader
+    with NullZooKeeperWriter
+    with NullZooKeeperMulti
 
 object NullZooKeeperClient extends NullZooKeeperClient
 object NullZooKeeperReader extends NullZooKeeperReader

@@ -1,7 +1,6 @@
 package com.twitter.finagle.netty4.channel
 
-import com.twitter.finagle.netty4.poolReceiveBuffers
-import com.twitter.finagle.netty4.ssl.Netty4SslHandler
+import com.twitter.finagle.netty4.ssl.server.Netty4ServerSslChannelInitializer
 import com.twitter.finagle.param._
 import com.twitter.finagle.transport.Transport
 import com.twitter.finagle.Stack
@@ -19,9 +18,8 @@ private[netty4] object Netty4RawServerChannelInitializer {
  *
  * @param params [[Stack.Params]] to configure the `Channel`.
  */
-private[netty4] class Netty4RawServerChannelInitializer(
-    params: Stack.Params)
-  extends ChannelInitializer[Channel] {
+private[netty4] class Netty4RawServerChannelInitializer(params: Stack.Params)
+    extends ChannelInitializer[Channel] {
 
   import Netty4RawServerChannelInitializer._
 
@@ -29,8 +27,11 @@ private[netty4] class Netty4RawServerChannelInitializer(
   private[this] val Label(label) = params[Label]
   private[this] val Stats(stats) = params[Stats]
 
-  private[this] val channelStatsHandler =
-    if (!stats.isNull) Some(new ChannelStatsHandler(stats)) else None
+  private[this] val sharedChannelStats =
+    if (!stats.isNull) {
+      val sharedChannelStatsFn = params[SharedChannelStats.Param].fn
+      Some(sharedChannelStatsFn(params))
+    } else None
 
   private[this] val channelSnooper =
     if (params[Transport.Verbose].enabled)
@@ -49,15 +50,13 @@ private[netty4] class Netty4RawServerChannelInitializer(
     val pipeline = ch.pipeline
 
     channelSnooper.foreach(pipeline.addFirst(ChannelLoggerHandlerKey, _))
-    channelStatsHandler.foreach(pipeline.addFirst(ChannelStatsHandlerKey, _))
 
-    // Add SslHandler to the pipeline.
-    pipeline.addFirst("tlsInit", new Netty4SslHandler(params))
-
-    // Enable tracking of the receive buffer sizes (when `poolReceiveBuffers` are enabled).
-    if (poolReceiveBuffers()) {
-      pipeline.addFirst("receiveBuffersSizeTracker",
-        new RecvBufferSizeStatsHandler(stats.scope("transport")))
+    sharedChannelStats.foreach { sharedStats =>
+      val channelStatsHandler = new ChannelStatsHandler(sharedStats)
+      pipeline.addFirst(ChannelStatsHandlerKey, channelStatsHandler)
     }
+
+    // Add SSL/TLS Channel Initializer to the pipeline.
+    pipeline.addFirst("tlsInit", new Netty4ServerSslChannelInitializer(params))
   }
 }

@@ -6,14 +6,14 @@ import com.twitter.finagle.filter.{
 }
 import com.twitter.finagle.http.{Request, Response, Status}
 import com.twitter.logging.Logger
-import com.twitter.util.{Duration, Time}
-import java.util.TimeZone
-import org.apache.commons.lang.time.FastDateFormat
+import com.twitter.util.Duration
+import java.time.{ZoneId, ZonedDateTime}
+import java.time.format.DateTimeFormatter
+import java.util.Locale
 
 trait LogFormatter extends CoreLogFormatter[Request, Response] {
   def escape(s: String): String = LogFormatter.escape(s)
 }
-
 
 object LogFormatter {
   private val BackslashV = 0x0b.toByte
@@ -35,13 +35,13 @@ object LogFormatter {
           builder = new StringBuilder(s.substring(0, index))
         }
         c match {
-          case '\b'       => builder.append("\\b")
-          case '\n'       => builder.append("\\n")
-          case '\r'       => builder.append("\\r")
-          case '\t'       => builder.append("\\t")
+          case '\b' => builder.append("\\b")
+          case '\n' => builder.append("\\n")
+          case '\r' => builder.append("\\r")
+          case '\t' => builder.append("\\t")
           case BackslashV => builder.append("\\v")
-          case '\\'       => builder.append("\\\\")
-          case '"'        => builder.append("\\\"")
+          case '\\' => builder.append("\\\\")
+          case '"' => builder.append("\\\"")
           case _ =>
             c.toString().getBytes("UTF-8").foreach { byte =>
               builder.append("\\x")
@@ -61,10 +61,9 @@ object LogFormatter {
   }
 }
 
-
 /** Apache-style common log formatter */
 class CommonLogFormatter extends LogFormatter {
-  /* See http://httpd.apache.org/docs/2.0/logs.html
+  /* See https://httpd.apache.org/docs/2.0/logs.html
    *
    * Apache common log format is: "%h %l %u %t \"%r\" %>s %b"
    *   %h: remote host
@@ -79,8 +78,12 @@ class CommonLogFormatter extends LogFormatter {
    *   %D: response time in milliseconds
    *   "%{User-Agent}i": user agent
    */
-  val DateFormat = FastDateFormat.getInstance("dd/MMM/yyyy:HH:mm:ss Z",
-                     TimeZone.getTimeZone("GMT"))
+  val DateFormat: DateTimeFormatter =
+    DateTimeFormatter
+      .ofPattern("dd/MMM/yyyy:HH:mm:ss Z")
+      .withLocale(Locale.ENGLISH)
+      .withZone(ZoneId.of("GMT"))
+
   def format(request: Request, response: Response, responseTime: Duration) = {
     val remoteAddr = request.remoteAddress.getHostAddress
 
@@ -112,37 +115,38 @@ class CommonLogFormatter extends LogFormatter {
     builder.toString
   }
 
-  def formatException(request: Request, throwable: Throwable, responseTime: Duration): String = throw new UnsupportedOperationException("Log throwables as empty 500s instead")
+  def formatException(request: Request, throwable: Throwable, responseTime: Duration): String =
+    throw new UnsupportedOperationException("Log throwables as empty 500s instead")
 
   def formattedDate(): String =
-    DateFormat.format(Time.now.toDate)
+    ZonedDateTime.now.format(DateFormat)
 }
-
 
 /**
  *  Logging filter.
  *
  * Logs all requests according to formatter.
- * Note this may be used upstream of a ValidateRequestFilter, so the URL and
- * parameters may be invalid.
  */
 class LoggingFilter[REQUEST <: Request](
   val log: Logger,
-  val formatter: CoreLogFormatter[REQUEST, Response]
-) extends CoreLoggingFilter[REQUEST, Response] {
+  val formatter: CoreLogFormatter[REQUEST, Response])
+    extends CoreLoggingFilter[REQUEST, Response] {
 
   // Treat exceptions as empty 500 errors
-  override protected def logException(duration: Duration, request: REQUEST, throwable: Throwable) {
+  override protected def logException(
+    duration: Duration,
+    request: REQUEST,
+    throwable: Throwable
+  ): Unit = {
     val response = Response(request.version, Status.InternalServerError)
     val line = formatter.format(request, response, duration)
     log.info(line)
   }
 }
 
-
-object LoggingFilter extends LoggingFilter[Request]({
-    val log = Logger("access")
-    log.setUseParentHandlers(false)
-    log
-  },
-  new CommonLogFormatter)
+object LoggingFilter
+    extends LoggingFilter[Request]({
+      val log = Logger("access")
+      log.setUseParentHandlers(false)
+      log
+    }, new CommonLogFormatter)

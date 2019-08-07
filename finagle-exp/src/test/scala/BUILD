@@ -1,14 +1,15 @@
 junit_tests(
-  dependencies=[
-    '3rdparty/jvm/junit',
-    '3rdparty/jvm/org/mockito:mockito-all',
-    '3rdparty/jvm/org/scalatest',
-    'finagle/finagle-exp',
-    'util/util-stats',
-    'finagle/finagle-core/src/main/scala:scala',
-    'finagle/finagle-thrift/src/main/java:java',
-    'util/util-core/src/main/scala:scala',
-  ],
-  fatal_warnings=True,
-  sources=rglobs('*.scala')
+    sources = rglobs("*.scala"),
+    compiler_option_sets = {"fatal_warnings"},
+    dependencies = [
+        "3rdparty/jvm/junit",
+        "3rdparty/jvm/org/mockito:mockito-all",
+        "3rdparty/jvm/org/scalatest",
+        "finagle/finagle-core/src/main/scala",
+        "finagle/finagle-core/src/test/scala:stringprotocol",
+        "finagle/finagle-exp",
+        "finagle/finagle-thrift/src/main/java",
+        "util/util-core/src/main/scala",
+        "util/util-stats",
+    ],
 )

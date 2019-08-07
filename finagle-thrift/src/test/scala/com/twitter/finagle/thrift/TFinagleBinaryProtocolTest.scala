@@ -1,35 +1,26 @@
 package com.twitter.finagle.thrift
 
-import com.google.common.base.Charsets
-import com.twitter.finagle.stats.{NullStatsReceiver, InMemoryStatsReceiver}
+import com.twitter.finagle.stats.{InMemoryStatsReceiver, NullStatsReceiver}
 import com.twitter.finagle.thrift.Protocols.TFinagleBinaryProtocol
 import java.nio.ByteBuffer
-import org.apache.thrift.transport.TMemoryBuffer
+import java.nio.charset.StandardCharsets
 import org.apache.thrift.protocol.TBinaryProtocol
-import org.junit.runner.RunWith
+import org.apache.thrift.transport.TMemoryBuffer
 import org.scalatest.{BeforeAndAfter, FunSuite, Matchers}
-import org.scalatest.junit.JUnitRunner
 import scala.util.Random
 
-@RunWith(classOf[JUnitRunner])
 class TFinagleBinaryProtocolTest extends FunSuite with BeforeAndAfter with Matchers {
 
   private val NullCounter = NullStatsReceiver.counter("")
 
-  private def assertSerializedBytes(
-    expectedBytes: Array[Byte],
-    trans: TMemoryBuffer
-  ) {
+  private def assertSerializedBytes(expectedBytes: Array[Byte], trans: TMemoryBuffer): Unit = {
     // 4 bytes for the string length
-    trans.length() should be (expectedBytes.length + 4)
-    trans.getArray().drop(4).take(expectedBytes.length) should be (expectedBytes)
+    trans.length() should be(expectedBytes.length + 4)
+    trans.getArray().drop(4).take(expectedBytes.length) should be(expectedBytes)
   }
 
-  private def assertSerializedBytes(
-    expected: String,
-    trans: TMemoryBuffer
-  ) {
-    val expectedBytes = expected.getBytes(Charsets.UTF_8)
+  private def assertSerializedBytes(expected: String, trans: TMemoryBuffer): Unit = {
+    val expectedBytes = expected.getBytes(StandardCharsets.UTF_8)
     assertSerializedBytes(expectedBytes, trans)
   }
 
@@ -37,25 +28,37 @@ class TFinagleBinaryProtocolTest extends FunSuite with BeforeAndAfter with Match
     val stats = new InMemoryStatsReceiver
     val largerThanTlOutBuffer = stats.counter("largerThanTlOutBuffer")
     val trans = new TMemoryBuffer(128)
-    val proto = new TFinagleBinaryProtocol(trans, largerThanTlOutBuffer)
+    val proto = new TFinagleBinaryProtocol(
+      trans,
+      largerThanTlOutBuffer,
+      stringLengthLimit = Protocols.NoLimit,
+      containerLengthLimit = Protocols.NoLimit,
+      strictRead = false,
+      strictWrite = true)
 
     proto.writeString("abc")
     assertSerializedBytes("abc", trans)
-    largerThanTlOutBuffer() should be (0)
+    largerThanTlOutBuffer() should be(0)
   }
 
   test("writeString same as TBinaryProtocol") {
-    def compare(str: String) {
+    def compare(str: String): Unit = {
       val plainTrans = new TMemoryBuffer(128)
       val plainProto = new TBinaryProtocol(plainTrans)
 
       val optTrans = new TMemoryBuffer(128)
-      val optProto = new TFinagleBinaryProtocol(optTrans, NullCounter)
+      val optProto = new TFinagleBinaryProtocol(
+        optTrans,
+        NullCounter,
+        stringLengthLimit = Protocols.NoLimit,
+        containerLengthLimit = Protocols.NoLimit,
+        strictRead = false,
+        strictWrite = true)
 
       plainProto.writeString(str)
       optProto.writeString(str)
-      plainTrans.length() should be (optTrans.length())
-      plainTrans.getArray() should be (optTrans.getArray())
+      plainTrans.length() should be(optTrans.length())
+      plainTrans.getArray() should be(optTrans.getArray())
     }
 
     compare("wurmp wurmp!")
@@ -70,9 +73,15 @@ class TFinagleBinaryProtocolTest extends FunSuite with BeforeAndAfter with Match
     val stats = new InMemoryStatsReceiver
     val largerThanTlOutBuffer = stats.counter("largerThanTlOutBuffer")
     val proto = new TFinagleBinaryProtocol(
-      trans, largerThanTlOutBuffer = largerThanTlOutBuffer)
+      trans,
+      largerThanTlOutBuffer = largerThanTlOutBuffer,
+      stringLengthLimit = Protocols.NoLimit,
+      containerLengthLimit = Protocols.NoLimit,
+      strictRead = false,
+      strictWrite = true
+    )
     proto.writeString(longStr)
-    largerThanTlOutBuffer() should be (1)
+    largerThanTlOutBuffer() should be(1)
     assertSerializedBytes(longStr, trans)
   }
 
@@ -81,13 +90,21 @@ class TFinagleBinaryProtocolTest extends FunSuite with BeforeAndAfter with Match
     val offset = 2
 
     val bbuf = ByteBuffer.allocate(len)
-    0 until len foreach { i => bbuf.put(i.toByte) }
+    0 until len foreach { i =>
+      bbuf.put(i.toByte)
+    }
     bbuf.position(offset)
     val withOffset = bbuf.slice()
-    withOffset.arrayOffset() should be (offset)
+    withOffset.arrayOffset() should be(offset)
 
     val trans = new TMemoryBuffer(128)
-    val proto = new TFinagleBinaryProtocol(trans, NullCounter)
+    val proto = new TFinagleBinaryProtocol(
+      trans,
+      NullCounter,
+      stringLengthLimit = Protocols.NoLimit,
+      containerLengthLimit = Protocols.NoLimit,
+      strictRead = false,
+      strictWrite = true)
     proto.writeBinary(withOffset)
 
     val expected = bbuf.array().drop(offset)
@@ -100,12 +117,20 @@ class TFinagleBinaryProtocolTest extends FunSuite with BeforeAndAfter with Match
     val limit = 18
 
     val buffer = ByteBuffer.allocate(len)
-    0.until(len).foreach { i => buffer.put(i.toByte) }
+    0.until(len).foreach { i =>
+      buffer.put(i.toByte)
+    }
     buffer.position(offset)
     buffer.limit(limit)
 
     val trans = new TMemoryBuffer(128)
-    val protocol = new TFinagleBinaryProtocol(trans, NullCounter)
+    val protocol = new TFinagleBinaryProtocol(
+      trans,
+      NullCounter,
+      stringLengthLimit = Protocols.NoLimit,
+      containerLengthLimit = Protocols.NoLimit,
+      strictRead = false,
+      strictWrite = true)
     protocol.writeBinary(buffer.asReadOnlyBuffer())
 
     val expected = buffer.array().drop(offset).take(limit - offset)
@@ -116,11 +141,19 @@ class TFinagleBinaryProtocolTest extends FunSuite with BeforeAndAfter with Match
     val len = 24
 
     val buffer = ByteBuffer.allocate(len)
-    0.until(len).foreach { i => buffer.put(i.toByte) }
+    0.until(len).foreach { i =>
+      buffer.put(i.toByte)
+    }
     buffer.position(0)
 
     val trans = new TMemoryBuffer(128)
-    val protocol = new TFinagleBinaryProtocol(trans, NullCounter)
+    val protocol = new TFinagleBinaryProtocol(
+      trans,
+      NullCounter,
+      stringLengthLimit = Protocols.NoLimit,
+      containerLengthLimit = Protocols.NoLimit,
+      strictRead = false,
+      strictWrite = true)
     protocol.writeBinary(buffer.asReadOnlyBuffer())
 
     val expected = buffer.array()

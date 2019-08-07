@@ -1,18 +1,16 @@
 package com.twitter.finagle.filter
 
-import com.twitter.conversions.time._
+import com.twitter.conversions.DurationOps._
 import com.twitter.finagle.Filter.TypeAgnostic
 import com.twitter.finagle._
+import com.twitter.finagle.context.Contexts
 import com.twitter.finagle.server.StackServer
 import com.twitter.finagle.stack.Endpoint
 import com.twitter.util.{Await, Future}
 import java.util.concurrent.atomic.AtomicInteger
-import org.junit.runner.RunWith
 import org.scalatest.FunSuite
-import org.scalatest.junit.JUnitRunner
-import org.scalatest.mock.MockitoSugar
+import org.scalatest.mockito.MockitoSugar
 
-@RunWith(classOf[JUnitRunner])
 class ServerAdmissionControlTest extends FunSuite with MockitoSugar {
   class Ctx {
     val a = new AtomicInteger(1)
@@ -47,7 +45,7 @@ class ServerAdmissionControlTest extends FunSuite with MockitoSugar {
     ServerAdmissionControl.unregisterAll()
 
     val echo = ServiceFactory.const(Service.mk[Int, Int](v => Future.value(v)))
-    val stack = StackServer.newStack[Int, Int] ++ Stack.Leaf(Endpoint, echo)
+    val stack = StackServer.newStack[Int, Int] ++ Stack.leaf(Endpoint, echo)
 
     ServerAdmissionControl.register(
       Addition2Filter.name,
@@ -72,7 +70,8 @@ class ServerAdmissionControlTest extends FunSuite with MockitoSugar {
 
     val factory = stack.make(
       StackServer.defaultParams +
-      ServerAdmissionControl.Param(false))
+        ServerAdmissionControl.Param(false)
+    )
     val svc = Await.result(factory(), 5.seconds)
     assert(Await.result(svc(1), 5.seconds) == 1)
     assert(a.get == 1)
@@ -83,7 +82,7 @@ class ServerAdmissionControlTest extends FunSuite with MockitoSugar {
     import ctx._
 
     ServerAdmissionControl.unregister(Addition2Filter.name)
-    
+
     val factory = stack.make(StackServer.defaultParams)
     val svc = Await.result(factory(), 5.seconds)
 
@@ -97,7 +96,8 @@ class ServerAdmissionControlTest extends FunSuite with MockitoSugar {
 
     ServerAdmissionControl.register(
       (Addition2Filter.name, Addition2Filter.typeAgnostic),
-      (Addition3Filter.name, Addition3Filter.typeAgnostic))
+      (Addition3Filter.name, Addition3Filter.typeAgnostic)
+    )
 
     val factory = stack.make(StackServer.defaultParams)
     val svc = Await.result(factory(), 5.seconds)
@@ -120,6 +120,18 @@ class ServerAdmissionControlTest extends FunSuite with MockitoSugar {
     assert(Await.result(svc(1), 5.seconds) == 1)
     assert(a.get == 3)
   }
+
+  test("Respects the NonRetryable context entry") {
+    val ctx = new Ctx
+    import ctx._
+
+    val factory = stack.make(StackServer.defaultParams)
+    val svc = Await.result(factory(), 5.seconds)
+
+    Contexts.local.let(ServerAdmissionControl.NonRetryable, ()) {
+      val aInitial = a.get
+      assert(Await.result(svc(1), 5.seconds) == 1)
+      assert(a.get == aInitial)
+    }
+  }
 }
-
-

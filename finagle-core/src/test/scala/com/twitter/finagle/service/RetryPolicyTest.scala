@@ -1,8 +1,14 @@
 package com.twitter.finagle.service
 
 import RetryPolicy._
-import com.twitter.conversions.time._
-import com.twitter.finagle.{ChannelClosedException, Failure, TimeoutException, WriteException}
+import com.twitter.conversions.DurationOps._
+import com.twitter.finagle.{
+  ChannelClosedException,
+  Failure,
+  FailureFlags,
+  TimeoutException,
+  WriteException
+}
 import com.twitter.util._
 import org.junit.runner.RunWith
 import org.scalatest.FunSpec
@@ -37,12 +43,12 @@ class RetryPolicyTest extends FunSpec {
 
       assert(!weo(Throw(new Exception)))
       assert(weo(Throw(WriteException(new Exception))))
-      assert(!weo(Throw(Failure(new Exception, Failure.Interrupted))))
-      // it's important that this failure isn't retried, despite being "restartable".
+      assert(!weo(Throw(Failure(new Exception, FailureFlags.Interrupted))))
+      // it's important that this failure isn't retried, despite being "retryable".
       // interrupted futures should never be retried.
-      assert(!weo(Throw(Failure(new Exception, Failure.Interrupted|Failure.Restartable))))
-      assert(weo(Throw(Failure(new Exception, Failure.Restartable))))
-      assert(!weo(Throw(Failure(new Exception, Failure.Rejected|Failure.NonRetryable))))
+      assert(!weo(Throw(Failure(new Exception, FailureFlags.Interrupted | FailureFlags.Retryable))))
+      assert(weo(Throw(Failure(new Exception, FailureFlags.Retryable))))
+      assert(!weo(Throw(Failure(new Exception, FailureFlags.Rejected | FailureFlags.NonRetryable))))
       assert(!weo(Throw(timeoutExc)))
     }
 
@@ -51,8 +57,8 @@ class RetryPolicyTest extends FunSpec {
 
       assert(!taweo(Throw(new Exception)))
       assert(taweo(Throw(WriteException(new Exception))))
-      assert(!taweo(Throw(Failure(new Exception, Failure.Interrupted))))
-      assert(taweo(Throw(Failure(timeoutExc, Failure.Interrupted))))
+      assert(!taweo(Throw(Failure(new Exception, FailureFlags.Interrupted))))
+      assert(taweo(Throw(Failure(timeoutExc, FailureFlags.Interrupted))))
       assert(taweo(Throw(timeoutExc)))
       assert(taweo(Throw(new com.twitter.util.TimeoutException(""))))
     }
@@ -60,8 +66,12 @@ class RetryPolicyTest extends FunSpec {
     it("RetryableWriteException matches retryable exception") {
       val retryable = Seq(Failure.rejected("test"), WriteException(new Exception))
       val nonRetryable =
-        Seq(Failure("test", Failure.Interrupted), new Exception, new ChannelClosedException,
-          Failure("boo", Failure.NonRetryable))
+        Seq(
+          Failure("test", FailureFlags.Interrupted),
+          new Exception,
+          new ChannelClosedException,
+          Failure("boo", FailureFlags.NonRetryable)
+        )
 
       retryable.foreach {
         case RetryPolicy.RetryableWriteException(_) =>
@@ -121,7 +131,8 @@ class RetryPolicyTest extends FunSpec {
     var currentMaxRetries: Int = 0
     val maxBackoffs = Stream.fill(3)(10.milliseconds)
     val policy =
-      RetryPolicy.backoff(maxBackoffs)(RetryPolicy.ChannelClosedExceptionsOnly)
+      RetryPolicy
+        .backoff(maxBackoffs)(RetryPolicy.ChannelClosedExceptionsOnly)
         .limit(currentMaxRetries)
 
     it("limits retries dynamically") {
@@ -140,7 +151,8 @@ class RetryPolicyTest extends FunSpec {
     val combinedPolicy =
       RetryPolicy.combine(
         RetryPolicy.backoff(Backoff.const(Duration.Zero).take(2))(RetryPolicy.WriteExceptionsOnly),
-        RetryPolicy.backoff(Stream.fill(3)(channelClosedBackoff))(RetryPolicy.ChannelClosedExceptionsOnly)
+        RetryPolicy
+          .backoff(Stream.fill(3)(channelClosedBackoff))(RetryPolicy.ChannelClosedExceptionsOnly)
       )
 
     it("return None for unmatched exception") {

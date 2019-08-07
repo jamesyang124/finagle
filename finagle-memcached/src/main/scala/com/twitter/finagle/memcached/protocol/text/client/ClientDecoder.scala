@@ -1,135 +1,163 @@
 package com.twitter.finagle.memcached.protocol.text.client
 
 import com.twitter.finagle.memcached.protocol.ServerError
-import com.twitter.finagle.memcached.protocol.text._
+import com.twitter.finagle.memcached.protocol.text.FrameDecoder
 import com.twitter.finagle.memcached.util.ParserUtils
 import com.twitter.io.Buf
+import com.twitter.logging.Logger
+import scala.collection.mutable
+
+private object ClientDecoder {
+  private val log = Logger.get()
+
+  private val End: Buf = Buf.Utf8("END")
+  private val Item: Buf = Buf.Utf8("ITEM")
+  private val Stat: Buf = Buf.Utf8("STAT")
+  private val Value: Buf = Buf.Utf8("VALUE")
+
+  private def isEnd(tokens: Seq[Buf]): Boolean =
+    tokens.length == 1 && tokens.head == End
+
+  private def isStats(tokens: Seq[Buf]): Boolean = {
+    if (tokens.isEmpty) false
+    else
+      tokens.head match {
+        case Stat | Item => true
+        case _ => false
+      }
+  }
+
+  private def validateValueResponse(args: Seq[Buf]): Unit = {
+    if (args.length < 4) throw new ServerError("Too few arguments")
+    if (args.length > 5) throw new ServerError("Too many arguments")
+    if (args.length == 5 && !ParserUtils.isDigits(args(4)))
+      throw new ServerError("CAS must be a number")
+    if (!ParserUtils.isDigits(args(3))) throw new ServerError("Bytes must be number")
+  }
+}
 
 /**
- * Decodes Buf-encoded Responses into Decodings. Used by the client.
+ * Decodes Buf-encoded protocol messages into protocol specific Responses. Used by the client.
  *
  * @note Class contains mutable state. Not thread-safe.
  */
-private[memcached] object ClientDecoder {
-  private val END: Buf = Buf.Utf8("END")
-  private val ITEM: Buf = Buf.Utf8("ITEM")
-  private val STAT: Buf = Buf.Utf8("STAT")
-  private val VALUE: Buf = Buf.Utf8("VALUE")
+private[finagle] abstract class ClientDecoder[R] extends FrameDecoder[R] {
+  import ClientDecoder._
 
-  private val EmptyValueLines: ValueLines = ValueLines(Seq.empty)
+  /** Type that represents a complete cache value */
+  protected type Value
 
-  // Constant for the length of a byte array that will contain a String representation of an Int,
-  // which is used in the Decoder class when converting a Buf to an Int
-  private val MaxLengthOfIntString = Int.MinValue.toString.length
-
-  private val NeedMoreData: Null = null
+  /** Sequence of tokens that represents a text line */
+  final protected type Tokens = Seq[Buf]
 
   private sealed trait State
   private case object AwaitingResponse extends State
-  private case class AwaitingResponseOrEnd(valuesSoFar: Seq[TokensWithData]) extends State
+  private case class AwaitingResponseOrEnd(valuesSoFar: Seq[Value]) extends State
   private case class AwaitingStatsOrEnd(valuesSoFar: Seq[Tokens]) extends State
-  private case class AwaitingData(
-      valuesSoFar: Seq[TokensWithData],
-      tokens: Seq[Buf],
-      bytesNeeded: Int) extends State
-}
-
-private[finagle] class ClientDecoder extends Decoder {
-  import ClientDecoder._
+  private case class AwaitingData(valuesSoFar: Seq[Value], tokens: Seq[Buf], bytesNeeded: Int)
+      extends State
+  private case class Failed(error: Throwable) extends State
 
   private[this] var state: State = AwaitingResponse
 
-  private[this] val awaitingResponseContinue: Seq[Buf] => Decoding = { tokens =>
-    if (isEnd(tokens)) {
-      EmptyValueLines
-    } else if (isStats(tokens)) {
-      awaitStatsOrEnd(Seq(Tokens(tokens)))
-      NeedMoreData
-    } else {
-      Tokens(tokens)
-    }
+  /** Parse a sequence of tokens into a response */
+  protected def parseResponse(tokens: Seq[Buf]): R
+
+  /** Parse a text line, its associated data, and the casUnique into a Value */
+  protected def parseValue(tokens: Seq[Buf], data: Buf): Value
+
+  /** Parse a collection of values into a single response */
+  protected def parseResponseValues(values: Seq[Value]): R
+
+  /** Parse a collection of token sequences into a single response */
+  protected def parseStatLines(lines: Seq[Tokens]): R
+
+  final def nextFrameBytes(): Int = state match {
+    case AwaitingData(_, _, bytesNeeded) => bytesNeeded
+    case _ => -1
   }
 
-  def decode(buffer: Buf): Decoding = {
-    state match {
-      case AwaitingResponse =>
-        decodeLine(buffer, needsData, awaitData)(awaitingResponseContinue)
+  final def decodeData(buffer: Buf, results: mutable.Buffer[R]): Unit = state match {
+    case AwaitingData(valuesSoFar, tokens, bytesNeeded) =>
+      // The framer should have given us the right sized Buf
+      if (buffer.length != bytesNeeded) {
+        throw new IllegalArgumentException(
+          s"Expected to receive a buffer of $bytesNeeded bytes but " +
+            s"only received ${buffer.length} bytes"
+        )
+      }
 
-      case AwaitingStatsOrEnd(linesSoFar) =>
-        decodeLine(buffer, needsData, awaitData) { tokens =>
-          state = AwaitingResponse
-          if (isEnd(tokens)) {
-            StatLines(linesSoFar)
-          } else if (isStats(tokens)) {
-            awaitStatsOrEnd(linesSoFar :+ Tokens(tokens))
-            NeedMoreData
-          } else {
-            throw new ServerError("Invalid reply from STATS command")
-          }
+      state = AwaitingResponseOrEnd(valuesSoFar :+ parseValue(tokens, buffer))
+
+    case AwaitingResponse =>
+      val tokens = ParserUtils.splitOnWhitespace(buffer)
+      val dataBytes = needsData(tokens)
+      if (dataBytes == -1) {
+        if (isEnd(tokens)) {
+          results += parseResponseValues(Nil)
+        } else if (isStats(tokens)) {
+          state = AwaitingStatsOrEnd(Vector(tokens))
+        } else {
+          results += parseResponse(tokens)
         }
-      case AwaitingData(valuesSoFar, tokens, bytesNeeded) =>
-        decodeData(bytesNeeded, buffer) { data =>
-          awaitResponseOrEnd(
-            valuesSoFar :+
-              TokensWithData(tokens, data)
+      } else {
+        // We are waiting for data next
+        state = AwaitingData(Nil, tokens, dataBytes)
+      }
+
+    case AwaitingStatsOrEnd(linesSoFar) =>
+      val tokens = ParserUtils.splitOnWhitespace(buffer)
+      if (isEnd(tokens)) {
+        state = AwaitingResponse
+        results += parseStatLines(linesSoFar)
+      } else if (isStats(tokens)) {
+        state = AwaitingStatsOrEnd(linesSoFar :+ tokens)
+      } else {
+        val ex = new ServerError("Invalid reply from STATS command")
+        state = Failed(ex)
+        throw ex
+      }
+
+    case AwaitingResponseOrEnd(valuesSoFar) =>
+      val tokens = ParserUtils.splitOnWhitespace(buffer)
+      val bytesNeeded = needsData(tokens)
+      if (bytesNeeded == -1) {
+        if (isEnd(tokens)) {
+          state = AwaitingResponse
+          results += parseResponseValues(valuesSoFar)
+        } else {
+          // This is a problem: if it wasn't a value line, it should have been an END.
+          val bufString =
+            tokens.foldLeft("") { (acc, buffer) =>
+              acc + Buf.Utf8.unapply(buffer).getOrElse("<non-string token>") + " "
+            }
+
+          val ex = new ServerError(
+            s"Server returned invalid response when values or END was expected: $bufString"
           )
-          NeedMoreData
+          state = Failed(ex)
+          throw ex
         }
-      case AwaitingResponseOrEnd(valuesSoFar) =>
-        decodeLine(buffer, needsData, awaitData) { tokens =>
-          state = AwaitingResponse
-          if (isEnd(tokens)) {
-            ValueLines(valuesSoFar)
-          } else NeedMoreData
-        }
+      } else {
+        state = AwaitingData(valuesSoFar, tokens, bytesNeeded)
+      }
+
+    case Failed(cause) =>
+      val msg = "Failed Memcached decoder called after previous decoding failure."
+      val ex = new IllegalStateException(msg, cause)
+      log.error(msg, ex)
+      throw ex
+  }
+
+  private[this] def needsData(tokens: Seq[Buf]): Int = {
+    if (tokens.isEmpty) -1
+    else {
+      val responseName = tokens.head
+      if (responseName == Value) {
+        validateValueResponse(tokens)
+        val dataLengthAsBuf = tokens(3)
+        ParserUtils.bufToInt(dataLengthAsBuf)
+      } else -1
     }
-  }
-
-  private[this] def awaitData(tokens: Seq[Buf], bytesNeeded: Int): Unit = {
-    state match {
-      case AwaitingResponse =>
-        awaitData(Nil, tokens, bytesNeeded)
-      case AwaitingResponseOrEnd(valuesSoFar) =>
-        awaitData(valuesSoFar, tokens, bytesNeeded)
-    }
-  }
-
-  private[this] def awaitData(
-    valuesSoFar: Seq[TokensWithData],
-    tokens: Seq[Buf],
-    bytesNeeded: Int
-  ): Unit = {
-    state = AwaitingData(valuesSoFar, tokens, bytesNeeded)
-  }
-
-  private[this] def awaitResponseOrEnd(valuesSoFar: Seq[TokensWithData]): Unit = {
-    state = AwaitingResponseOrEnd(valuesSoFar)
-  }
-
-  private[this] def awaitStatsOrEnd(valuesSoFar: Seq[Tokens]): Unit = {
-    state = AwaitingStatsOrEnd(valuesSoFar)
-  }
-
-  private[this] def isEnd(tokens: Seq[Buf]) =
-    tokens.length == 1 && tokens.head == END
-
-  private[this] def isStats(tokens: Seq[Buf]) =
-    tokens.nonEmpty && (tokens.head == STAT || tokens.head == ITEM)
-
-  private[this] val needsData: Seq[Buf] => Int = { tokens =>
-    val responseName = tokens.head
-    if (responseName == VALUE) {
-      validateValueResponse(tokens)
-      val dataLengthAsBuf = tokens(3)
-      dataLengthAsBuf.write(byteArrayForBuf2Int, 0)
-      ParserUtils.byteArrayStringToInt(byteArrayForBuf2Int, dataLengthAsBuf.length)
-    } else -1
-  }
-
-  private[this] def validateValueResponse(args: Seq[Buf]): Unit = {
-    if (args.length < 4) throw new ServerError("Too few arguments")
-    if (args.length > 5) throw new ServerError("Too many arguments")
-    if (args.length == 5 && !ParserUtils.isDigits(args(4))) throw new ServerError("CAS must be a number")
-    if (!ParserUtils.isDigits(args(3))) throw new ServerError("Bytes must be number")
   }
 }

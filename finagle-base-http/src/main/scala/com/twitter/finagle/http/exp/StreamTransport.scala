@@ -3,8 +3,6 @@ package com.twitter.finagle.http.exp
 import com.twitter.finagle.Status
 import com.twitter.finagle.transport.Transport
 import com.twitter.util.{Future, Time}
-import java.net.SocketAddress
-import java.security.cert.Certificate
 
 /**
  * A multi-part object with a single read handle, and a future that is satisfied
@@ -35,13 +33,12 @@ private[finagle] trait StreamTransport[In, Out] extends Transport[In, Multi[Out]
   def read(): Future[Multi[Out]]
 }
 
-private[finagle] abstract class StreamTransportProxy[In, Out](self: Transport[_, _])
-  extends StreamTransport[In, Out] {
+private[finagle] abstract class StreamTransportProxy[In, Out](val self: Transport[_, _])
+    extends StreamTransport[In, Out] {
+  type Context = self.Context
 
   def status: Status = self.status
   val onClose: Future[Throwable] = self.onClose
-  def localAddress: SocketAddress = self.localAddress
-  def remoteAddress: SocketAddress = self.remoteAddress
   def close(deadline: Time): Future[Unit] = self.close(deadline)
-  def peerCertificate: Option[Certificate] = self.peerCertificate
+  def context: Context = self.context
 }

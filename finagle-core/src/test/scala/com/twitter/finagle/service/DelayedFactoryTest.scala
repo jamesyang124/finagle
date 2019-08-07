@@ -16,11 +16,11 @@ class DelayedFactoryTest extends FunSuite {
     val failed = new Exception("failed")
 
     def underlying: ServiceFactory[Int, Int]
-    def completeFuture() {
+    def completeFuture(): Unit = {
       future.setValue(underlying)
     }
 
-    def throwFuture() {
+    def throwFuture(): Unit = {
       future.setException(failed)
     }
     def factory: ServiceFactory[Int, Int]
@@ -62,13 +62,13 @@ class DelayedFactoryTest extends FunSuite {
     val factory = DelayedFactory.swapOnComplete(future)
   }
 
-  def numWaitersCheckFactory(factory: ServiceFactory[Int, Int], num: Int) {
+  def numWaitersCheckFactory(factory: ServiceFactory[Int, Int], num: Int): Unit = {
     factory.getClass.getDeclaredMethods.find(_.getName == "numWaiters").foreach { meth =>
       assert(meth.invoke(factory) == num)
     }
   }
 
-  def testDelayedHelpers(helpers: Map[String, () => DelayedHelper]) {
+  def testDelayedHelpers(helpers: Map[String, () => DelayedHelper]): Unit = {
     for ((name, helpFn) <- helpers) {
       test(
         "%s: buffered factories' proxy services should buffer until the factory is ready"
@@ -164,7 +164,7 @@ class DelayedFactoryTest extends FunSuite {
 
       test(
         "%s: a factory that's completed with an exception should finish with an exception"
-        .format(name)
+          .format(name)
       ) {
         val ctx = helpFn()
         import ctx._
@@ -181,7 +181,7 @@ class DelayedFactoryTest extends FunSuite {
     }
   }
 
-  def testClosingDelayedHelpers(helpers: Map[String, () => ClosingDelayedHelper]) {
+  def testClosingDelayedHelpers(helpers: Map[String, () => ClosingDelayedHelper]): Unit = {
     for ((name, helpFn) <- helpers) {
       test(
         "%s: a closed buffered factory should close the underlying factory once it's ready"
@@ -226,7 +226,10 @@ class DelayedFactoryTest extends FunSuite {
         assert(!underlying.isAvailable)
       }
 
-      test("%s: a factory that's closed prematurely should close the underlying on satisfaction".format(name)) {
+      test(
+        "%s: a factory that's closed prematurely should close the underlying on satisfaction"
+          .format(name)
+      ) {
         val ctx = helpFn()
         import ctx._
 
@@ -239,13 +242,17 @@ class DelayedFactoryTest extends FunSuite {
     }
   }
 
-  testDelayedHelpers(Map(
-    "Normal" -> (() => new BareDelayedHelper{}),
-    "Swapping" -> (() => new SwapOnBareHelper{})
-  ))
-  testClosingDelayedHelpers(Map(
-    "Normal" -> (() => new DefaultClosingHelper{}),
-    "Swapping" -> (() => new SwapOnCloseHelper{})
-  ))
+  testDelayedHelpers(
+    Map(
+      "Normal" -> (() => new BareDelayedHelper {}),
+      "Swapping" -> (() => new SwapOnBareHelper {})
+    )
+  )
+  testClosingDelayedHelpers(
+    Map(
+      "Normal" -> (() => new DefaultClosingHelper {}),
+      "Swapping" -> (() => new SwapOnCloseHelper {})
+    )
+  )
 
 }
